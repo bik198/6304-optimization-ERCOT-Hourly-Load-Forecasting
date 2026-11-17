@@ -36,69 +36,102 @@ from src.config import (
 from src.data_pipeline import build_feature_dict_from_raw, save_system_csv
 
 
-def _apply_dark_carbon_style(ax: plt.Axes, fig: plt.Figure) -> None:
-    """Style a matplotlib figure/axes pair using the Antigravity Dark Carbon palette.
-
-    Enforces neutral carbon gray surfaces (#181818 outer shell, #1F1F1F canvas,
-    #2B2B2B gridlines) paired with bright White/Blue/Yellow typography.
-    """
+def _create_dark_figure(figsize: tuple[float, float], ncols: int = 1) -> tuple[plt.Figure, Any]:
+    """Create a 1- or 2-panel Matplotlib figure pre-styled with the Dark Carbon palette."""
+    fig, axes = plt.subplots(1, ncols, figsize=figsize, dpi=160)
     fig.patch.set_facecolor(PAL["bg_darkest"])
-    ax.set_facecolor(PAL["bg_primary"])
-    ax.grid(True, color=PAL["bg_card"], linestyle="-", linewidth=0.7, alpha=0.9)
-    ax.set_axisbelow(True)
-    for spine in ax.spines.values():
-        spine.set_color(PAL["border_input"])
-    ax.tick_params(colors=PAL["text_main"], labelsize=9)
-    ax.xaxis.label.set_color(PAL["text_bright"])
-    ax.yaxis.label.set_color(PAL["text_bright"])
-    ax.title.set_color(PAL["text_blue"])
+    ax_list = list(axes) if ncols > 1 else [axes]
+    for ax in ax_list:
+        ax.set_facecolor(PAL["bg_primary"])
+        ax.grid(True, color=PAL["bg_card"], linestyle="-", linewidth=0.7, alpha=0.9)
+        ax.set_axisbelow(True)
+        for spine in ax.spines.values():
+            spine.set_color(PAL["border_input"])
+        ax.tick_params(colors=PAL["text_main"], labelsize=9)
+        ax.xaxis.label.set_color(PAL["text_bright"])
+        ax.yaxis.label.set_color(PAL["text_bright"])
+        ax.title.set_color(PAL["text_blue"])
+    return fig, axes
 
 
-def _plot_fig1_weekly_load(system_data: dict[str, Any], out_path: Path) -> None:
-    """Render Figure 1 (Proposal Sec. 3.3): Weekly average ERCOT load from 2018 to 2026.
+def _style_axes_and_legend(
+    ax: plt.Axes,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    legend_loc: str | None = None,
+    legend_ncol: int = 1,
+    legend_fontsize: float = 8.5,
+    title_fontsize: float = 12,
+    label_fontsize: float = 10,
+) -> None:
+    """Apply consistent title, axis labels, and optional Dark Carbon legend styling."""
+    ax.set_title(title, fontsize=title_fontsize, fontweight="bold", pad=10 if title_fontsize >= 12 else 8)
+    ax.set_xlabel(xlabel, fontsize=label_fontsize, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=label_fontsize, fontweight="bold")
+    if legend_loc is not None:
+        ax.legend(
+            loc=legend_loc,
+            ncol=legend_ncol,
+            fontsize=legend_fontsize,
+            facecolor=PAL["bg_card"],
+            edgecolor=PAL["border_input"],
+            labelcolor=PAL["text_main"],
+        )
 
-    Overlays shaded chronological split regions (Train / Validation / Test) and
-    highlights the February 2021 Winter Storm Uri spike for context.
+
+def _save_and_close(fig: plt.Figure, out_path: Path) -> None:
+    """Tightly fit layout, write PNG preserving Dark Carbon background, and free memory."""
+    fig.tight_layout()
+    fig.savefig(out_path, facecolor=fig.get_facecolor())
+    plt.close(fig)
+
+
+def generate_eda_figures(system_data: dict[str, Any], figures_dir: Path) -> None:
+    """Parse timestamps once and render all four Proposal Section 3.3 EDA figures.
+
+    Figures produced in `figures_dir`:
+      1. `fig1_weekly_avg_load.png`       : Weekly demand trend (2018-2026) + split shading + Uri
+      2. `fig2_hourly_load_profile.png`   : Diurnal mean load & IQR across hours 00-23
+      3. `fig3_monthly_load_profile.png`  : Monthly demand seasonality (Jan-Dec)
+      4. `fig4_load_distribution_and_uri.png`: Demand histogram + Feb 2021 Winter Storm Uri zoom
     """
-    timestamps = [datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") for ts in system_data["timestamp"]]
+    # Parse all 77,496 timestamp strings ONCE and reuse across all figures
+    parsed_dts = [datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") for ts in system_data["timestamp"]]
+    hours = np.array([dt.hour for dt in parsed_dts], dtype=np.int32)
+    months = np.array([dt.month for dt in parsed_dts], dtype=np.int32)
     loads = system_data["system_total_mw"]
     uri_flags = system_data["uri_flag"]
 
-    # Aggregate hourly MW values into ISO calendar year-week buckets in chronological order
+    # -----------------------------------------------------------------------
+    # Figure 1: Weekly Average ERCOT System Load Over Time (2018-2026)
+    # -----------------------------------------------------------------------
     week_buckets: dict[tuple[int, int], list[tuple[datetime, float]]] = {}
-    for dt, val in zip(timestamps, loads):
+    for dt, val in zip(parsed_dts, loads):
         iso = dt.isocalendar()
         week_buckets.setdefault((iso.year, iso.week), []).append((dt, float(val)))
 
-    # Use the first timestamp of each week as its x-axis coordinate and mean MW as y-value
     week_dates = [pts[0][0] for pts in week_buckets.values()]
     week_means = np.array([np.mean([p[1] for p in pts]) for pts in week_buckets.values()])
 
-    fig, ax = plt.subplots(figsize=(11, 4.4), dpi=160)
-    _apply_dark_carbon_style(ax, fig)
-
-    # Shaded chronological split spans matching Proposal Section 3.2
-    val_dt = datetime(2024, 1, 1)
-    test_dt = datetime(2026, 1, 1)
-    uri_start = datetime(2021, 2, 14)
-    uri_end = datetime(2021, 2, 20, 23)
+    fig, ax = _create_dark_figure((11, 4.4))
+    val_dt, test_dt = datetime(2024, 1, 1), datetime(2026, 1, 1)
+    uri_start, uri_end = datetime(2021, 2, 14), datetime(2021, 2, 20, 23)
 
     ax.axvspan(week_dates[0], val_dt, color="#252526", alpha=0.45, label="Train (2018-2023)")
     ax.axvspan(val_dt, test_dt, color="#2B2B2B", alpha=0.55, label="Validation (2024-2025)")
     ax.axvspan(test_dt, week_dates[-1], color="#323234", alpha=0.65, label="Test (2026)")
     ax.axvspan(uri_start, uri_end, color=PAL["text_red"], alpha=0.35, label="Winter Storm Uri (Feb 2021)")
-
-    # Plot weekly mean trend and vertical dashed split markers
     ax.plot(week_dates, week_means, color=PAL["text_link"], linewidth=1.6, label="Weekly Avg System Load")
     ax.axvline(val_dt, color=PAL["text_gold"], linestyle="--", linewidth=1.1)
     ax.axvline(test_dt, color=PAL["text_yellow"], linestyle="--", linewidth=1.1)
 
-    # Annotate the Winter Storm Uri hourly peak (69,692 MW) pointing to Feb 2021 weekly spike
     uri_vals = loads[uri_flags]
     if uri_vals.size > 0:
+        feb21_mask = (np.array(week_dates) >= datetime(2021, 2, 1)) & (np.array(week_dates) <= datetime(2021, 3, 1))
         ax.annotate(
             f"Uri Peak: {np.max(uri_vals):,.0f} MW",
-            xy=(datetime(2021, 2, 15), float(np.max(week_means[(np.array(week_dates) >= datetime(2021, 2, 1)) & (np.array(week_dates) <= datetime(2021, 3, 1))]))),
+            xy=(datetime(2021, 2, 15), float(np.max(week_means[feb21_mask]))),
             xytext=(datetime(2019, 9, 1), 69500),
             color=PAL["text_red"],
             fontsize=8.5,
@@ -106,102 +139,73 @@ def _plot_fig1_weekly_load(system_data: dict[str, Any], out_path: Path) -> None:
             arrowprops={"arrowstyle": "->", "color": PAL["text_red"], "lw": 1.1},
         )
 
-    ax.set_title("ERCOT System Load: Weekly Average (2018-2026)", fontsize=12, fontweight="bold", pad=10)
-    ax.set_ylabel("System Load (MW)", fontsize=10, fontweight="bold")
-    ax.set_xlabel("Date", fontsize=10, fontweight="bold")
     ax.xaxis.set_major_locator(mdates.YearLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax.legend(
-        loc="upper left",
-        ncol=3,
-        fontsize=8,
-        facecolor=PAL["bg_card"],
-        edgecolor=PAL["border_input"],
-        labelcolor=PAL["text_main"],
+    _style_axes_and_legend(
+        ax,
+        title="ERCOT System Load: Weekly Average (2018-2026)",
+        xlabel="Date",
+        ylabel="System Load (MW)",
+        legend_loc="upper left",
+        legend_ncol=3,
+        legend_fontsize=8,
     )
-    fig.tight_layout()
-    fig.savefig(out_path, facecolor=fig.get_facecolor())
-    plt.close(fig)
+    _save_and_close(fig, figures_dir / "fig1_weekly_avg_load.png")
 
-
-def _plot_fig2_hourly_profile(system_data: dict[str, Any], out_path: Path) -> None:
-    """Render Figure 2 (Proposal Sec. 3.3): Diurnal demand profile by hour of day (00-23).
-
-    Shows the mean load curve alongside the 25th-75th percentile band so overnight
-    charging troughs (~03:00) and afternoon discharging peaks (~17:00) stand out.
-    """
-    hours = np.array([int(ts[11:13]) for ts in system_data["timestamp"]], dtype=np.int32)
-    loads = system_data["system_total_mw"]
-
-    # Compute mean and interquartile spread across all years for each clock hour 0..23
+    # -----------------------------------------------------------------------
+    # Figure 2: Average Diurnal Load Profile by Hour of Day (00-23)
+    # -----------------------------------------------------------------------
     hr_axis = np.arange(24)
-    means = np.array([np.mean(loads[hours == h]) for h in hr_axis])
-    q25 = np.array([np.percentile(loads[hours == h], 25) for h in hr_axis])
-    q75 = np.array([np.percentile(loads[hours == h], 75) for h in hr_axis])
+    hr_means = np.array([np.mean(loads[hours == h]) for h in hr_axis])
+    hr_q25 = np.array([np.percentile(loads[hours == h], 25) for h in hr_axis])
+    hr_q75 = np.array([np.percentile(loads[hours == h], 75) for h in hr_axis])
 
-    fig, ax = plt.subplots(figsize=(9.5, 4.2), dpi=160)
-    _apply_dark_carbon_style(ax, fig)
+    fig, ax = _create_dark_figure((9.5, 4.2))
+    ax.fill_between(hr_axis, hr_q25, hr_q75, color=PAL["text_blue"], alpha=0.22, label="Interquartile Range (25th-75th pct)")
+    ax.plot(hr_axis, hr_means, color=PAL["text_yellow"], marker="o", markersize=5, linewidth=2.0, label="Mean System Load")
 
-    ax.fill_between(hr_axis, q25, q75, color=PAL["text_blue"], alpha=0.22, label="Interquartile Range (25th-75th pct)")
-    ax.plot(hr_axis, means, color=PAL["text_yellow"], marker="o", markersize=5, linewidth=2.0, label="Mean System Load")
-
-    # Mark daily average peak (battery discharge target) and trough (battery charge window)
-    peak_hr = int(np.argmax(means))
-    trough_hr = int(np.argmin(means))
-    ax.scatter([peak_hr], [means[peak_hr]], color=PAL["text_red"], s=65, zorder=5)
+    peak_hr, trough_hr = int(np.argmax(hr_means)), int(np.argmin(hr_means))
+    ax.scatter([peak_hr], [hr_means[peak_hr]], color=PAL["text_red"], s=65, zorder=5)
     ax.annotate(
-        f"Peak Avg: {means[peak_hr]:,.0f} MW (Hour {peak_hr:02d}:00)",
-        xy=(peak_hr, means[peak_hr]),
-        xytext=(peak_hr - 6.5, means[peak_hr] + 3200),
+        f"Peak Avg: {hr_means[peak_hr]:,.0f} MW (Hour {peak_hr:02d}:00)",
+        xy=(peak_hr, hr_means[peak_hr]),
+        xytext=(peak_hr - 6.5, hr_means[peak_hr] + 3200),
         color=PAL["text_gold"],
         fontsize=8.5,
         fontweight="bold",
         arrowprops={"arrowstyle": "->", "color": PAL["text_gold"], "lw": 1.0},
     )
     ax.annotate(
-        f"Trough Avg: {means[trough_hr]:,.0f} MW (Hour {trough_hr:02d}:00)",
-        xy=(trough_hr, means[trough_hr]),
-        xytext=(trough_hr + 2.0, means[trough_hr] - 4200),
+        f"Trough Avg: {hr_means[trough_hr]:,.0f} MW (Hour {trough_hr:02d}:00)",
+        xy=(trough_hr, hr_means[trough_hr]),
+        xytext=(trough_hr + 2.0, hr_means[trough_hr] - 4200),
         color=PAL["text_sky"],
         fontsize=8.5,
         arrowprops={"arrowstyle": "->", "color": PAL["text_sky"], "lw": 1.0},
     )
 
     ax.set_xticks(hr_axis)
-    ax.set_title("Average ERCOT System Load by Hour of Day", fontsize=12, fontweight="bold", pad=10)
-    ax.set_xlabel("Hour of Day (00-23)", fontsize=10, fontweight="bold")
-    ax.set_ylabel("System Load (MW)", fontsize=10, fontweight="bold")
-    ax.legend(
-        loc="upper left",
-        fontsize=8.5,
-        facecolor=PAL["bg_card"],
-        edgecolor=PAL["border_input"],
-        labelcolor=PAL["text_main"],
+    _style_axes_and_legend(
+        ax,
+        title="Average ERCOT System Load by Hour of Day",
+        xlabel="Hour of Day (00-23)",
+        ylabel="System Load (MW)",
+        legend_loc="upper left",
     )
-    fig.tight_layout()
-    fig.savefig(out_path, facecolor=fig.get_facecolor())
-    plt.close(fig)
+    _save_and_close(fig, figures_dir / "fig2_hourly_load_profile.png")
 
-
-def _plot_fig3_monthly_profile(system_data: dict[str, Any], out_path: Path) -> None:
-    """Render Figure 3 (Proposal Sec. 3.3): Average ERCOT demand by calendar month (Jan-Dec)."""
-    months = np.array([int(ts[5:7]) for ts in system_data["timestamp"]], dtype=np.int32)
-    loads = system_data["system_total_mw"]
-
+    # -----------------------------------------------------------------------
+    # Figure 3: Monthly Demand Seasonality Bar Chart (Jan-Dec)
+    # -----------------------------------------------------------------------
     month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     m_means = np.array([np.mean(loads[months == m]) for m in range(1, 13)])
-
-    fig, ax = plt.subplots(figsize=(9.5, 4.2), dpi=160)
-    _apply_dark_carbon_style(ax, fig)
-
-    # Highlight peak summer AC months (Jul/Aug in gold, Jun/Sep in sky blue, rest standard blue)
     bar_colors = [
         PAL["text_gold"] if m in (7, 8) else (PAL["text_blue"] if m in (6, 9) else PAL["text_link"])
         for m in range(1, 13)
     ]
-    bars = ax.bar(month_names, m_means, color=bar_colors, edgecolor=PAL["border_input"], linewidth=0.9, width=0.68)
 
-    # Place compact MW labels ("61.2k") cleanly above each bar
+    fig, ax = _create_dark_figure((9.5, 4.2))
+    bars = ax.bar(month_names, m_means, color=bar_colors, edgecolor=PAL["border_input"], linewidth=0.9, width=0.68)
     for bar, val in zip(bars, m_means):
         ax.text(
             bar.get_x() + bar.get_width() / 2.0,
@@ -214,60 +218,55 @@ def _plot_fig3_monthly_profile(system_data: dict[str, Any], out_path: Path) -> N
         )
 
     ax.set_ylim(0, float(np.max(m_means)) * 1.14)
-    ax.set_title("Average ERCOT System Load by Month (2018-2026)", fontsize=12, fontweight="bold", pad=10)
-    ax.set_xlabel("Month", fontsize=10, fontweight="bold")
-    ax.set_ylabel("Average System Load (MW)", fontsize=10, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(out_path, facecolor=fig.get_facecolor())
-    plt.close(fig)
+    _style_axes_and_legend(
+        ax,
+        title="Average ERCOT System Load by Month (2018-2026)",
+        xlabel="Month",
+        ylabel="Average System Load (MW)",
+    )
+    _save_and_close(fig, figures_dir / "fig3_monthly_load_profile.png")
 
+    # -----------------------------------------------------------------------
+    # Figure 4: Hourly Load Distribution & Winter Storm Uri Zoom (Feb 2021)
+    # -----------------------------------------------------------------------
+    fig, (ax_left, ax_right) = _create_dark_figure((11.5, 4.3), ncols=2)
 
-def _plot_fig4_distribution_and_uri(system_data: dict[str, Any], out_path: Path) -> None:
-    """Render Figure 4: Side-by-side load histogram and Feb 2021 Winter Storm Uri zoom."""
-    loads = system_data["system_total_mw"]
-    uri_flags = system_data["uri_flag"]
-    timestamps = [datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") for ts in system_data["timestamp"]]
-
-    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(11.5, 4.3), dpi=160)
-    _apply_dark_carbon_style(ax_left, fig)
-    _apply_dark_carbon_style(ax_right, fig)
-
-    # Left subplot: Distribution of all 77,496 hourly demands with extreme tail markers
     bins = np.linspace(float(np.min(loads)), float(np.max(loads)), 55)
+    p99, max_load = float(np.percentile(loads, 99)), float(np.max(loads))
     ax_left.hist(loads, bins=bins, color=PAL["text_blue"], alpha=0.72, edgecolor=PAL["bg_darkest"], label="All Hours (77,496)")
     ax_left.hist(loads[uri_flags], bins=bins, color=PAL["text_red"], alpha=0.85, edgecolor=PAL["bg_darkest"], label="Winter Storm Uri (168h)")
-    p99 = float(np.percentile(loads, 99))
-    max_load = float(np.max(loads))
     ax_left.axvline(p99, color=PAL["text_yellow"], linestyle="--", linewidth=1.2, label=f"99th Pct: {p99:,.0f} MW")
     ax_left.axvline(max_load, color=PAL["text_red"], linestyle=":", linewidth=1.3, label=f"Max Peak: {max_load:,.0f} MW")
-    ax_left.set_title("Hourly System Load Distribution", fontsize=11, fontweight="bold", pad=8)
-    ax_left.set_xlabel("System Load (MW)", fontsize=9.5, fontweight="bold")
-    ax_left.set_ylabel("Hour Count", fontsize=9.5, fontweight="bold")
-    ax_left.legend(loc="upper right", fontsize=7.8, facecolor=PAL["bg_card"], edgecolor=PAL["border_input"], labelcolor=PAL["text_main"])
+    _style_axes_and_legend(
+        ax_left,
+        title="Hourly System Load Distribution",
+        xlabel="System Load (MW)",
+        ylabel="Hour Count",
+        legend_loc="upper right",
+        legend_fontsize=7.8,
+        title_fontsize=11,
+        label_fontsize=9.5,
+    )
 
-    # Right subplot: Feb 11-24, 2021 zoom highlighting the flagged Uri blackout drop (Feb 14-20)
-    win_start = datetime(2021, 2, 11)
-    win_end = datetime(2021, 2, 24, 23)
-    mask = np.array([(win_start <= dt <= win_end) for dt in timestamps], dtype=bool)
-    win_dt = [dt for dt, m in zip(timestamps, mask) if m]
-    win_load = loads[mask]
-    win_uri = uri_flags[mask]
-
+    win_mask = np.array([(datetime(2021, 2, 11) <= dt <= datetime(2021, 2, 24, 23)) for dt in parsed_dts], dtype=bool)
+    win_dt = [dt for dt, m in zip(parsed_dts, win_mask) if m]
+    win_load, win_uri = loads[win_mask], uri_flags[win_mask]
     ax_right.plot(win_dt, win_load, color=PAL["text_sky"], linewidth=1.3, label="System Load (Feb 11-24)")
-    uri_dt = [dt for dt, u in zip(win_dt, win_uri) if u]
-    uri_val = win_load[win_uri]
-    ax_right.plot(uri_dt, uri_val, color=PAL["text_red"], linewidth=1.9, label="Flagged Uri Window (Feb 14-20)")
-    ax_right.axvspan(datetime(2021, 2, 14), datetime(2021, 2, 20, 23), color=PAL["text_red"], alpha=0.14)
-    ax_right.set_title("Winter Storm Uri Event Window (Feb 2021)", fontsize=11, fontweight="bold", pad=8)
-    ax_right.set_xlabel("Date", fontsize=9.5, fontweight="bold")
-    ax_right.set_ylabel("System Load (MW)", fontsize=9.5, fontweight="bold")
+    ax_right.plot([dt for dt, u in zip(win_dt, win_uri) if u], win_load[win_uri], color=PAL["text_red"], linewidth=1.9, label="Flagged Uri Window (Feb 14-20)")
+    ax_right.axvspan(uri_start, uri_end, color=PAL["text_red"], alpha=0.14)
     ax_right.xaxis.set_major_locator(mdates.DayLocator(interval=3))
     ax_right.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-    ax_right.legend(loc="lower right", fontsize=7.8, facecolor=PAL["bg_card"], edgecolor=PAL["border_input"], labelcolor=PAL["text_main"])
-
-    fig.tight_layout()
-    fig.savefig(out_path, facecolor=fig.get_facecolor())
-    plt.close(fig)
+    _style_axes_and_legend(
+        ax_right,
+        title="Winter Storm Uri Event Window (Feb 2021)",
+        xlabel="Date",
+        ylabel="System Load (MW)",
+        legend_loc="lower right",
+        legend_fontsize=7.8,
+        title_fontsize=11,
+        label_fontsize=9.5,
+    )
+    _save_and_close(fig, figures_dir / "fig4_load_distribution_and_uri.png")
 
 
 def run_step0() -> dict[str, Any]:
@@ -288,11 +287,8 @@ def run_step0() -> dict[str, Any]:
     with AUDIT_JSON_PATH.open("w", encoding="utf-8") as f:
         json.dump(audit_summary, f, indent=2)
 
-    # Step 4: Generate all four Dark Carbon Exploratory Data Analysis charts
-    _plot_fig1_weekly_load(system_data, FIGURES_DIR / "fig1_weekly_avg_load.png")
-    _plot_fig2_hourly_profile(system_data, FIGURES_DIR / "fig2_hourly_load_profile.png")
-    _plot_fig3_monthly_profile(system_data, FIGURES_DIR / "fig3_monthly_load_profile.png")
-    _plot_fig4_distribution_and_uri(system_data, FIGURES_DIR / "fig4_load_distribution_and_uri.png")
+    # Step 4: Generate all four Dark Carbon Exploratory Data Analysis charts in one pass
+    generate_eda_figures(system_data, FIGURES_DIR)
 
     # Step 5: Print concise verification report to terminal
     print("=" * 72)

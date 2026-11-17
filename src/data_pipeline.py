@@ -67,6 +67,31 @@ def assign_split(ts_str: str) -> str:
     return "test"
 
 
+def _summarize_load_dict(vals: np.ndarray, include_hours: bool = False) -> dict[str, Any]:
+    """Compute rounded summary statistics (mean, std, min, median, max MW) for a load array."""
+    summary: dict[str, Any] = {}
+    if include_hours:
+        summary["hours"] = int(vals.size)
+    summary.update(
+        {
+            "mean_mw": round(float(np.mean(vals)), 2),
+            "std_mw": round(float(np.std(vals)), 2),
+            "min_mw": round(float(np.min(vals)), 2),
+            "median_mw": round(float(np.median(vals)), 2),
+            "max_mw": round(float(np.max(vals)), 2),
+        }
+    )
+    return summary
+
+
+def _four_stat_vec(arr: np.ndarray) -> np.ndarray:
+    """Return [mean, std, min, max] summary vector for a rolling load window."""
+    return np.array(
+        [float(np.mean(arr)), float(np.std(arr)), float(np.min(arr)), float(np.max(arr))],
+        dtype=np.float64,
+    )
+
+
 def _find_missing_dates(timestamps: list[str]) -> list[str]:
     """Scan every calendar date from start to end and return any completely absent dates.
 
@@ -253,18 +278,13 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
 
     # Summarize hourly load distributions for Train, Validation, and Test splits
     split_hour_counts = dict(Counter(splits))
-    split_load_stats: dict[str, dict[str, float]] = {}
-    for split_name in ("train", "val", "test"):
-        mask = np.array([s == split_name for s in splits], dtype=bool)
-        vals = system_total_mw[mask]
-        split_load_stats[split_name] = {
-            "hours": int(np.sum(mask)),
-            "mean_mw": round(float(np.mean(vals)), 2),
-            "std_mw": round(float(np.std(vals)), 2),
-            "min_mw": round(float(np.min(vals)), 2),
-            "median_mw": round(float(np.median(vals)), 2),
-            "max_mw": round(float(np.max(vals)), 2),
-        }
+    split_load_stats = {
+        split_name: _summarize_load_dict(
+            system_total_mw[np.array([s == split_name for s in splits], dtype=bool)],
+            include_hours=True,
+        )
+        for split_name in ("train", "val", "test")
+    }
 
     uri_vals = system_total_mw[uri_flags]
     uri_timestamps = [ts for ts, u in zip(timestamps, uri_flags) if u]
@@ -308,13 +328,7 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
         },
         "split_hour_counts": split_hour_counts,
         "split_load_stats_mw": split_load_stats,
-        "overall_load_stats_mw": {
-            "mean_mw": round(float(np.mean(system_total_mw)), 2),
-            "std_mw": round(float(np.std(system_total_mw)), 2),
-            "min_mw": round(float(np.min(system_total_mw)), 2),
-            "median_mw": round(float(np.median(system_total_mw)), 2),
-            "max_mw": round(float(np.max(system_total_mw)), 2),
-        },
+        "overall_load_stats_mw": _summarize_load_dict(system_total_mw),
     }
 
     system_data: dict[str, Any] = {
@@ -373,12 +387,16 @@ def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, A
             valid_hrs = np.where(~np.isnan(load_24))[0]
             load_24 = np.interp(np.arange(24), valid_hrs, load_24[valid_hrs])
 
-        # Precompute target-day weather summaries separately for optional upper-bound experiments
+        # Precompute target-day weather summaries (mean/min/max across 4 vars) for optional upper-bound runs
         idx_arr = np.array(idxs, dtype=np.int64)
-        temp_f_day = weather["temp_f"][idx_arr]
-        dwpt_day = weather["dwpt"][idx_arr]
-        rhum_day = weather["rhum"][idx_arr]
-        wspd_day = weather["wspd"][idx_arr]
+        weather_summary = np.array(
+            [
+                float(stat(weather[col][idx_arr]))
+                for col in ("temp_f", "dwpt", "rhum", "wspd")
+                for stat in (np.mean, np.min, np.max)
+            ],
+            dtype=np.float64,
+        )
 
         daily[d] = {
             "load_24": load_24,
@@ -386,23 +404,7 @@ def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, A
             "is_dst_transition": is_dst_day,
             "is_uri": bool(np.any(uri_flags[idx_arr])),
             "split": system_data["split"][idxs[0]],
-            "weather_summary": np.array(
-                [
-                    np.mean(temp_f_day),
-                    np.min(temp_f_day),
-                    np.max(temp_f_day),
-                    np.mean(dwpt_day),
-                    np.min(dwpt_day),
-                    np.max(dwpt_day),
-                    np.mean(rhum_day),
-                    np.min(rhum_day),
-                    np.max(rhum_day),
-                    np.mean(wspd_day),
-                    np.min(wspd_day),
-                    np.max(wspd_day),
-                ],
-                dtype=np.float64,
-            ),
+            "weather_summary": weather_summary,
         }
     return daily
 
@@ -500,29 +502,10 @@ def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
             for k in range(0, 7)
             if (origin_d - timedelta(days=k)) in daily
         ]
-        past_2to6_arr = np.concatenate(past_2to6_loads)
-        roll_7d_arr = np.concatenate(roll_7d_loads)
-
         lag_1d_vec = daily[origin_d]["load_24"]
         lag_7d_vec = daily[lag7_d]["load_24"]
-        summary_2to6 = np.array(
-            [
-                float(np.mean(past_2to6_arr)),
-                float(np.std(past_2to6_arr)),
-                float(np.min(past_2to6_arr)),
-                float(np.max(past_2to6_arr)),
-            ],
-            dtype=np.float64,
-        )
-        summary_7d = np.array(
-            [
-                float(np.mean(roll_7d_arr)),
-                float(np.std(roll_7d_arr)),
-                float(np.min(roll_7d_arr)),
-                float(np.max(roll_7d_arr)),
-            ],
-            dtype=np.float64,
-        )
+        summary_2to6 = _four_stat_vec(np.concatenate(past_2to6_loads))
+        summary_7d = _four_stat_vec(np.concatenate(roll_7d_loads))
         cal_vec = _calendar_features(target_d, daily[target_d]["is_dst_transition"])
 
         # Concatenate all 67 causal predictors into one row vector for origin_d -> target_d
