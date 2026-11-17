@@ -1,0 +1,152 @@
+{
+  "raw_file": "ercot_model_table.csv",
+  "total_raw_rows": 619968,
+  "expected_total_rows": 619968,
+  "columns": [
+    "timestamp",
+    "DSTFlag",
+    "source",
+    "uri_flag",
+    "system_total_mw",
+    "zone",
+    "load_mw",
+    "temp",
+    "dwpt",
+    "rhum",
+    "wspd",
+    "prcp",
+    "temp_f"
+  ],
+  "unique_timestamp_dst_pairs": 77496,
+  "expected_unique_hours": 77496,
+  "unique_timestamps_without_dst": 77487,
+  "dst_repeated_hours_count": 9,
+  "dst_repeated_timestamps": [
+    "2018-11-04 01:00:00",
+    "2019-11-03 01:00:00",
+    "2020-11-01 01:00:00",
+    "2021-11-07 01:00:00",
+    "2022-11-06 01:00:00",
+    "2023-11-05 01:00:00",
+    "2024-11-03 01:00:00",
+    "2025-11-02 01:00:00",
+    "2026-11-01 01:00:00"
+  ],
+  "missing_calendar_dates": [
+    "2026-10-30"
+  ],
+  "zones": {
+    "coast": 77496,
+    "east": 77496,
+    "farWest": 77496,
+    "north": 77496,
+    "northC": 77496,
+    "southC": 77496,
+    "southern": 77496,
+    "west": 77496
+  },
+  "sources_raw_rows": {
+    "api": 6536,
+    "archive": 613432
+  },
+  "archive_date_range": [
+    "2018-01-01 00:00:00",
+    "2026-09-30 23:00:00"
+  ],
+  "api_date_range": [
+    "2026-10-01 00:00:00",
+    "2026-11-04 23:00:00"
+  ],
+  "max_cross_zone_system_mw_spread": 0.0,
+  "cross_zone_source_mismatches": 0,
+  "cross_zone_uri_mismatches": 0,
+  "raw_missing_weather_counts": {
+    "dwpt": 67,
+    "rhum": 66,
+    "temp": 67,
+    "temp_f": 67,
+    "wspd": 7
+  },
+  "raw_missing_weather_by_split": {
+    "dwpt:train": 67,
+    "rhum:train": 66,
+    "temp:train": 67,
+    "temp_f:train": 67,
+    "wspd:train": 7
+  },
+  "train_weather_impute_medians": {
+    "temp": 21.0375,
+    "dwpt": 13.8875,
+    "rhum": 66.5,
+    "wspd": 15.0063,
+    "prcp": 0.0,
+    "temp_f": 69.875
+  },
+  "uri_flag_zone_rows": 1344,
+  "uri_flag_system_hours": 168,
+  "uri_date_range": [
+    "2021-02-14 00:00:00",
+    "2021-02-20 23:00:00"
+  ],
+  "uri_peak_mw": 69692.49,
+  "split_boundaries": {
+    "train": [
+      "2018-01-01 00:00:00",
+      "2023-12-31 23:00:00"
+    ],
+    "val": [
+      "2024-01-01 00:00:00",
+      "2025-12-31 23:00:00"
+    ],
+    "test": [
+      "2026-01-01 00:00:00",
+      "2026-11-04 23:00:00"
+    ]
+  },
+  "split_hour_counts": {
+    "train": 52584,
+    "val": 17544,
+    "test": 7368
+  },
+  "split_load_stats_mw": {
+    "train": {
+      "hours": 52584,
+      "mean_mw": 45812.3,
+      "std_mw": 10569.79,
+      "min_mw": 27138.78,
+      "median_mw": 43225.59,
+      "max_mw": 85464.12
+    },
+    "val": {
+      "hours": 17544,
+      "mean_mw": 54133.91,
+      "std_mw": 10450.7,
+      "min_mw": 35855.65,
+      "median_mw": 51709.66,
+      "max_mw": 85198.85
+    },
+    "test": {
+      "hours": 7368,
+      "mean_mw": 59694.34,
+      "std_mw": 11937.6,
+      "min_mw": 39679.84,
+      "median_mw": 57399.89,
+      "max_mw": 91133.73
+    }
+  },
+  "overall_load_stats_mw": {
+    "mean_mw": 49016.04,
+    "std_mw": 11739.5,
+    "min_mw": 27138.78,
+    "median_mw": 46589.24,
+    "max_mw": 91133.73
+  },
+  "day_ahead_sample_counts": {
+    "total_days": 3221,
+    "train_days": 2184,
+    "val_days": 731,
+    "test_days": 306,
+    "n_features": 67,
+    "horizon_hours": 24
+  }
+}
