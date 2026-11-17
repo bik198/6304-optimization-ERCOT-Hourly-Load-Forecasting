@@ -1,4 +1,8 @@
-"""Unit tests verifying Step 0 audit integrity, zero data leakage, and generated artifacts."""
+"""Unit tests verifying Step 0 audit integrity, zero data leakage, and generated artifacts.
+
+Run with:
+    python -m unittest discover -s tests -p "test_*.py" -v
+"""
 
 from __future__ import annotations
 
@@ -23,30 +27,37 @@ from src.data_pipeline import audit_and_deduplicate, split_and_prepare_features
 
 
 class TestStep0Pipeline(unittest.TestCase):
-    """Validate raw dataset audit, chronological split safety, and EDA artifacts."""
+    """Test suite asserting Step 0 data correctness, chronological isolation, and file outputs."""
 
     @classmethod
     def setUpClass(cls) -> None:
+        """Load and process the raw ERCOT CSV once across all four unit tests."""
         cls.system_data, cls.audit = audit_and_deduplicate(RAW_CSV_PATH)
         cls.bundle = split_and_prepare_features(cls.system_data)
 
     def test_audit_matches_proposal_profile(self) -> None:
-        """Audit counts must exactly match Proposal Section 3.1."""
+        """Verify audited counts match Proposal Section 3.1 (rows, zones, sources, DST, missingness)."""
         self.assertEqual(self.audit["total_raw_rows"], EXPECTED_TOTAL_ROWS)
         self.assertEqual(self.audit["unique_timestamp_dst_pairs"], EXPECTED_TIMESTAMPS)
+
+        # Every one of the 8 ERCOT weather zones must appear identically across all 77,496 hours
         self.assertEqual(tuple(sorted(self.audit["zones"].keys())), tuple(sorted(EXPECTED_ZONES)))
         for z in EXPECTED_ZONES:
             self.assertEqual(self.audit["zones"][z], EXPECTED_TIMESTAMPS)
+
+        # Verify archive vs. API source breakdown and zero cross-zone discrepancy in system load
         self.assertEqual(self.audit["sources_raw_rows"]["archive"], 613_432)
         self.assertEqual(self.audit["sources_raw_rows"]["api"], 6_536)
         self.assertEqual(self.audit["max_cross_zone_system_mw_spread"], 0.0)
+
+        # Verify 9 November DST fall-back repeated 01:00 hours and raw missing weather counts
         self.assertEqual(self.audit["dst_repeated_hours_count"], 9)
         self.assertEqual(self.audit["raw_missing_weather_counts"]["temp"], 67)
         self.assertEqual(self.audit["raw_missing_weather_counts"]["rhum"], 66)
         self.assertEqual(self.audit["raw_missing_weather_counts"]["wspd"], 7)
 
     def test_chronological_splits_strictly_ordered(self) -> None:
-        """Train timestamps must strictly precede validation, which strictly precedes test."""
+        """Ensure train timestamps strictly precede validation, which strictly precedes test."""
         ts = self.system_data["timestamp"]
         splits = self.system_data["split"]
 
@@ -60,7 +71,7 @@ class TestStep0Pipeline(unittest.TestCase):
         self.assertLess(max(train_ts), min(val_ts))
         self.assertLess(max(val_ts), min(test_ts))
 
-        # Verify day-ahead sample splits are also strictly ordered
+        # Confirm the derived day-ahead target date samples preserve the exact same strict order
         d_splits = self.bundle["splits"]
         t_dates = self.bundle["target_dates"]
         self.assertLess(
@@ -73,8 +84,8 @@ class TestStep0Pipeline(unittest.TestCase):
         )
 
     def test_zero_future_leakage_in_features_and_scaler(self) -> None:
-        """Mutating a future day's load must not alter earlier origin-day features or train scalers."""
-        # Verify scaler_mean and scaler_std match ONLY training rows
+        """Prove neither feature construction nor standardization leaks future test-set data."""
+        # 1) Verify scaler_mean and scaler_std match ONLY the 2018-2023 training rows
         train_mask = self.bundle["splits"] == "train"
         expected_mean = np.mean(self.bundle["X_raw"][train_mask], axis=0)
         expected_std = np.std(self.bundle["X_raw"][train_mask], axis=0)
@@ -83,7 +94,7 @@ class TestStep0Pipeline(unittest.TestCase):
         np.testing.assert_allclose(self.bundle["scaler_mean"], expected_mean, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(self.bundle["scaler_std"], expected_std, rtol=1e-12, atol=1e-12)
 
-        # Mutate the entire year 2026 test period in a copy and verify train/val X_raw are unchanged
+        # 2) Perturb the entire 2026 test set by +25,000 MW and verify train/val X remain bit-exact
         mutated_sys = copy.deepcopy(self.system_data)
         for i, s in enumerate(mutated_sys["split"]):
             if s == "test":
@@ -104,7 +115,8 @@ class TestStep0Pipeline(unittest.TestCase):
             atol=0.0,
         )
 
-        # Also check mutating a single target test day (index k) leaves its own X_raw[k] identical
+        # 3) Perturb a single target test day (+10,000 MW) and verify its own input X[k] is unchanged
+        #    while its target Y[k] shifts by > 9,999 MW.
         test_indices = np.where(self.bundle["splits"] == "test")[0]
         target_date_to_perturb = str(self.bundle["target_dates"][test_indices[10]])
         mutated_one = copy.deepcopy(self.system_data)
@@ -117,7 +129,7 @@ class TestStep0Pipeline(unittest.TestCase):
         self.assertGreater(np.mean(one_bundle["Y"][idx_10] - self.bundle["Y"][idx_10]), 9_999.0)
 
     def test_generated_step0_artifacts_exist_and_nonempty(self) -> None:
-        """All exported CSV, NPZ, JSON, and PNG figure files must exist and be valid."""
+        """Confirm all exported CSV, NPZ, JSON, and PNG figure files exist on disk and are valid."""
         expected_files: list[Path] = [
             SYSTEM_CSV_PATH,
             FEATURES_NPZ_PATH,

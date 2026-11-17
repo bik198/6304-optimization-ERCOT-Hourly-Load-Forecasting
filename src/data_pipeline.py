@@ -1,7 +1,20 @@
 """Step 0 data audit, deduplication, and leakage-safe feature pipeline.
 
-Pure standard-library CSV + NumPy implementation (no pandas binary dependency)
-so the entire pipeline executes reliably under strict Windows DLL policies.
+Why no pandas?
+    On Windows machines where Application Control policies block unsigned compiled
+    C-extensions (such as pandas's `nattype` DLL), `import pandas` fails. Using
+    Python's built-in `csv` + `datetime` modules alongside `numpy` keeps this entire
+    data pipeline fast, deterministic, and dependency-safe everywhere.
+
+Main Workflow:
+    1. `audit_and_deduplicate()` reads all 619,968 raw rows in a single streaming pass,
+       verifies that `system_total_mw` repeats identically across the 8 ERCOT weather
+       zones, audits DST fall-back hours / missing dates / missing weather values, and
+       collapses the table into 77,496 unique hourly system records.
+    2. `split_and_prepare_features()` builds day-ahead forecasting pairs (at the end
+       of day `d`, predict all 24 hours of day `d+1`) using strictly causal past load
+       and deterministic calendar variables, while fitting scalers strictly on `train`.
+    3. `save_system_csv()` exports the clean 77,496-row hourly system table.
 """
 
 from __future__ import annotations
@@ -27,7 +40,7 @@ from .config import (
 
 
 def _parse_float(value: str) -> float:
-    """Convert raw CSV string to float, returning NaN for empty/NA entries."""
+    """Convert a raw CSV cell string to float, returning NaN for empty or NA markers."""
     s = value.strip()
     if s == "" or s.lower() in {"na", "nan", "null", "none"}:
         return float("nan")
@@ -35,12 +48,18 @@ def _parse_float(value: str) -> float:
 
 
 def _parse_bool(value: str) -> bool:
-    """Convert CSV boolean string ('True'/'False') to bool."""
+    """Convert a CSV boolean flag string ('True'/'False') to a Python bool."""
     return value.strip().lower() == "true"
 
 
 def assign_split(ts_str: str) -> str:
-    """Assign chronological split label ('train', 'val', or 'test') by timestamp."""
+    """Assign each timestamp strictly chronologically to 'train', 'val', or 'test'.
+
+    ISO-8601 strings ("YYYY-MM-DD HH:MM:SS") compare cleanly lexicographically:
+      - train : 2018-01-01 00:00:00 through 2023-12-31 23:00:00
+      - val   : 2024-01-01 00:00:00 through 2025-12-31 23:00:00
+      - test  : 2026-01-01 00:00:00 onward
+    """
     if ts_str <= TRAIN_END:
         return "train"
     if ts_str < TEST_START:
@@ -49,7 +68,11 @@ def assign_split(ts_str: str) -> str:
 
 
 def _find_missing_dates(timestamps: list[str]) -> list[str]:
-    """Return sorted ISO dates missing between first and last observed date."""
+    """Scan every calendar date from start to end and return any completely absent dates.
+
+    Detecting missing calendar days (e.g., 2026-10-30 in the API segment) is critical
+    so downstream lag generation never silently treats `d+2` as consecutive day `d+1`.
+    """
     seen = {ts[:10] for ts in timestamps}
     start_d = date.fromisoformat(min(seen))
     end_d = date.fromisoformat(max(seen))
@@ -64,18 +87,32 @@ def _find_missing_dates(timestamps: list[str]) -> list[str]:
 
 
 def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Audit raw multi-zone ERCOT CSV and deduplicate to unique hourly system series.
+    """Audit raw multi-zone ERCOT CSV and deduplicate to a unique hourly system series.
+
+    Each timestamp in `ercot_model_table.csv` appears 8 times (once per weather zone).
+    This function:
+      - Streams all rows once and verifies schema & expected columns.
+      - Groups rows by `(timestamp, DSTFlag)` so the repeated `01:00:00` hour during
+        each November Daylight Saving Time fall-back is preserved as two distinct hours
+        rather than overwritten.
+      - Verifies that `system_total_mw`, `source`, and `uri_flag` match identically across
+        all 8 zones at each hour.
+      - Averages zone weather readings per hour and imputes any remaining NaNs using
+        medians computed strictly on the `train` split (2018-2023).
 
     Args:
-        raw_csv_path: Path to ercot_model_table.csv.
+        raw_csv_path: Path to `ercot_model_table.csv`.
 
     Returns:
-        Tuple of (system_data dict of aligned chronological arrays, audit_summary dict).
+        `(system_data, audit_summary)`:
+          - `system_data`: dict of 77,496-element chronological arrays/lists.
+          - `audit_summary`: JSON-serializable audit dictionary for reproducibility.
     """
     raw_csv_path = Path(raw_csv_path)
     if not raw_csv_path.exists():
         raise FileNotFoundError(f"Raw dataset not found: {raw_csv_path}")
 
+    # Running audit accumulators updated row-by-row during the single file pass
     total_rows = 0
     zone_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
@@ -83,7 +120,8 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
     missing_raw_by_split: Counter[str] = Counter()
     uri_zone_rows = 0
 
-    # Keyed by (timestamp, DSTFlag) in order of first appearance (coast slice)
+    # Keyed by `(timestamp, DSTFlag)` because November fall-back repeats 01:00:00
+    # once with DSTFlag=False and once with DSTFlag=True.
     hourly_records: dict[tuple[str, bool], dict[str, Any]] = {}
     ordered_keys: list[tuple[str, bool]] = []
     max_sys_spread = 0.0
@@ -106,11 +144,13 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
             sys_mw = float(row["system_total_mw"])
             load_mw = float(row["load_mw"])
 
+            # Tally per-zone, per-source, and Winter Storm Uri row counts
             zone_counts[zone] += 1
             source_counts[source] += 1
             if uri_flag:
                 uri_zone_rows += 1
 
+            # Track raw weather missingness both globally and by chronological split
             split_lbl = assign_split(ts)
             weather_vals: dict[str, float] = {}
             for wcol in WEATHER_COLUMNS:
@@ -120,6 +160,7 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
                     missing_raw_by_col[wcol] += 1
                     missing_raw_by_split[f"{wcol}:{split_lbl}"] += 1
 
+            # Create or update the deduplicated hourly bucket for this (timestamp, DSTFlag)
             key = (ts, dst_flag)
             rec = hourly_records.get(key)
             if rec is None:
@@ -135,6 +176,7 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
                 hourly_records[key] = rec
                 ordered_keys.append(key)
             else:
+                # Sanity check: ensure system-wide values really are identical across all 8 zones
                 spread = abs(rec["system_total_mw"] - sys_mw)
                 if spread > max_sys_spread:
                     max_sys_spread = spread
@@ -143,15 +185,18 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
                 if rec["uri_flag"] != uri_flag:
                     uri_mismatch_count += 1
 
+            # Store each individual zone's load and accumulate non-NaN weather values
             rec["zone_loads"][zone] = load_mw
             for wcol, val in weather_vals.items():
                 if not np.isnan(val):
                     rec["weather_lists"][wcol].append(val)
 
-    # Sort chronologically by (timestamp string, dst_flag: False before True on fall-back)
+    # Sort chronologically by timestamp string, placing DSTFlag=False before DSTFlag=True
+    # on the 9 November fall-back nights so time flows strictly forward.
     ordered_keys.sort(key=lambda k: (k[0], k[1]))
     n_hours = len(ordered_keys)
 
+    # Pre-allocate dense NumPy arrays for fast downstream slicing and plotting
     timestamps: list[str] = []
     dst_flags = np.zeros(n_hours, dtype=bool)
     sources: list[str] = []
@@ -162,6 +207,7 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
     zone_loads_arr = {z: np.zeros(n_hours, dtype=np.float64) for z in EXPECTED_ZONES}
     weather_mean_arr = {w: np.full(n_hours, np.nan, dtype=np.float64) for w in WEATHER_COLUMNS}
 
+    # Count occurrences of each timestamp string (without DSTFlag) to detect fall-back pairs
     ts_only_counter: Counter[str] = Counter()
     for idx, key in enumerate(ordered_keys):
         rec = hourly_records[key]
@@ -174,6 +220,7 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
         splits.append(assign_split(ts))
         system_total_mw[idx] = rec["system_total_mw"]
 
+        # Record each zone's hourly MW and compute their exact cross-zone sum
         zsum = 0.0
         for z in EXPECTED_ZONES:
             val = rec["zone_loads"][z]
@@ -181,12 +228,14 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
             zsum += val
         zone_load_sum_mw[idx] = zsum
 
+        # Compute system-wide cross-zone average weather for each valid variable
         for wcol in WEATHER_COLUMNS:
             vals = rec["weather_lists"][wcol]
             if vals:
                 weather_mean_arr[wcol][idx] = float(np.mean(vals))
 
-    # Training-only imputation for any missing aggregated weather entries (safety guard)
+    # Leakage Control #1: Fit weather median imputation strictly on `train` hours (2018-2023)
+    # so validation/test weather distributions never leak into training imputation rules.
     train_mask = np.array([s == "train" for s in splits], dtype=bool)
     weather_impute_medians: dict[str, float] = {}
     for wcol in WEATHER_COLUMNS:
@@ -198,9 +247,11 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
         if np.any(nan_mask):
             arr[nan_mask] = med
 
+    # Identify all 9 DST fall-back repeated timestamps and any missing calendar dates
     dst_repeated_timestamps = sorted(ts for ts, cnt in ts_only_counter.items() if cnt > 1)
     missing_dates = _find_missing_dates(timestamps)
 
+    # Summarize hourly load distributions for Train, Validation, and Test splits
     split_hour_counts = dict(Counter(splits))
     split_load_stats: dict[str, dict[str, float]] = {}
     for split_name in ("train", "val", "test"):
@@ -218,6 +269,7 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
     uri_vals = system_total_mw[uri_flags]
     uri_timestamps = [ts for ts, u in zip(timestamps, uri_flags) if u]
 
+    # Package full machine-readable audit report
     audit_summary: dict[str, Any] = {
         "raw_file": raw_csv_path.name,
         "total_raw_rows": total_rows,
@@ -280,7 +332,17 @@ def audit_and_deduplicate(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str,
 
 
 def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, Any]]:
-    """Aggregate hourly records into 24-hour clock vectors [0..23] per calendar date."""
+    """Aggregate the hourly system array into fixed 24-hour clock vectors [00..23] per day.
+
+    Handling Daylight Saving Time (DST) transitions cleanly:
+      - Normal days (3,211 days) have exactly 1 observation for each hour 0..23.
+      - Fall-back DST days (9 days, 25 hours) have two 01:00 rows; averaging them aligns
+        the fixed-width 24-hour matrix while flagging `is_dst_transition=True`.
+      - Spring-forward DST days (9 days, 23 hours) skip 02:00; linear neighbor interpolation
+        fills hour 02 ONLY inside the fixed-width 24-hour matrix (the exported hourly CSV
+        preserves all 77,496 exact raw timestamps untouched).
+    """
+    # Group hourly array indices by ISO calendar date ("YYYY-MM-DD")
     grouped: dict[date, list[int]] = defaultdict(list)
     for idx, ts in enumerate(system_data["timestamp"]):
         grouped[date.fromisoformat(ts[:10])].append(idx)
@@ -292,6 +354,7 @@ def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, A
     weather = system_data["weather_mean"]
 
     for d, idxs in grouped.items():
+        # Bucket indices by clock hour 0..23 within this calendar day
         hour_buckets: dict[int, list[int]] = defaultdict(list)
         for i in idxs:
             hr = int(system_data["timestamp"][i][11:13])
@@ -299,9 +362,10 @@ def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, A
 
         load_24 = np.full(24, np.nan, dtype=np.float64)
         for hr, b_idxs in hour_buckets.items():
+            # For normal hours len(b_idxs)==1; on fall-back 01:00 len(b_idxs)==2
             load_24[hr] = float(np.mean(sys_mw[b_idxs]))
 
-        # Spring-forward DST day has 23 hours (02:00 skipped); fill via linear neighbor mean
+        # Fill skipped 02:00 slot on spring-forward 23h days via adjacent-hour average
         is_dst_day = len(idxs) != 24 or any(bool(dst_flags[i]) for i in idxs)
         if np.isnan(load_24[2]) and not np.isnan(load_24[1]) and not np.isnan(load_24[3]):
             load_24[2] = 0.5 * (load_24[1] + load_24[3])
@@ -309,6 +373,7 @@ def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, A
             valid_hrs = np.where(~np.isnan(load_24))[0]
             load_24 = np.interp(np.arange(24), valid_hrs, load_24[valid_hrs])
 
+        # Precompute target-day weather summaries separately for optional upper-bound experiments
         idx_arr = np.array(idxs, dtype=np.int64)
         temp_f_day = weather["temp_f"][idx_arr]
         dwpt_day = weather["dwpt"][idx_arr]
@@ -343,7 +408,14 @@ def _build_daily_profiles(system_data: dict[str, Any]) -> dict[date, dict[str, A
 
 
 def _calendar_features(target_day: date, is_dst_transition: bool) -> np.ndarray:
-    """Return 11 deterministic calendar features known before target_day starts."""
+    """Build 11 deterministic calendar features known ahead of time for `target_day`.
+
+    Features:
+      - `[0..1]`: Cyclical month encoding (sin, cos) so Dec (12) wraps smoothly to Jan (1).
+      - `[2..8]`: 7-dim one-hot day-of-week (Monday=0 .. Sunday=6).
+      - `[9]`   : Binary weekend flag (1.0 for Saturday/Sunday, else 0.0).
+      - `[10]`  : Binary DST transition day flag (known from calendar schedule).
+    """
     month_angle = 2.0 * np.pi * (target_day.month - 1) / 12.0
     dow = target_day.weekday()  # 0=Mon .. 6=Sun
     dow_onehot = np.zeros(7, dtype=np.float64)
@@ -360,7 +432,7 @@ def _calendar_features(target_day: date, is_dst_transition: bool) -> np.ndarray:
 
 
 def get_day_ahead_feature_names() -> list[str]:
-    """Return ordered human-readable names for the 67 causal day-ahead features."""
+    """Return ordered human-readable column names for all 67 causal day-ahead features."""
     names = [f"lag_1d_h{h:02d}" for h in range(24)]
     names += [f"lag_7d_h{h:02d}" for h in range(24)]
     names += ["past_2to6d_mean", "past_2to6d_std", "past_2to6d_min", "past_2to6d_max"]
@@ -372,14 +444,24 @@ def get_day_ahead_feature_names() -> list[str]:
 
 
 def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
-    """Construct leakage-safe day-ahead 24h examples and training-only scalers.
+    """Build leakage-safe day-ahead 24h supervised matrices `(X_raw, X_scaled, Y)`.
 
-    At the end of origin day d, predicts the 24 hourly loads of day d+1 using ONLY:
-      - Day d hourly profile (lag 1 day from target d+1)
-      - Day d-6 hourly profile (lag 7 days from target d+1)
-      - Rolling summaries over available days in [d-5..d-1] and [d-6..d]
-      - Deterministic calendar features of target day d+1
-    Observed target-day weather is stored separately as `upper_bound_weather_only`.
+    Forecast Issuance Protocol (Proposal Section 4.1):
+      Standing at the end of origin day `d` (23:00), predict the 24 hourly loads of
+      tomorrow `target_d = d + 1`. Only information observed on or before day `d` plus
+      deterministic calendar features of `d + 1` enters `X_raw`:
+        1. `lag_1d` (24 features): Today's (`origin_d`) 24 hourly loads.
+        2. `lag_7d` (24 features): Same weekday one week ago (`target_d - 7d == origin_d - 6d`).
+        3. `past_2to6d_summary` (4 features): Mean, std, min, max across available days in `[d-5..d-1]`.
+        4. `roll_7d_summary` (4 features): Mean, std, min, max across available days in `[d-6..d]`.
+        5. `calendar` (11 features): Cyclical month, day-of-week one-hot, weekend, DST transition.
+
+    Leakage Controls:
+      - Missing calendar date `2026-10-30` is handled by checking exact `date` dictionary keys
+        instead of blind array indexing, preventing shifted lag alignment.
+      - Target-day observed weather is NEVER included in `X_raw`/`X_scaled`; it is isolated in
+        `upper_bound_weather_only` for optional non-causal upper-bound ablation checks only.
+      - Feature standardization (`scaler_mean`, `scaler_std`) is fit strictly on `train` days.
     """
     daily = _build_daily_profiles(system_data)
     sorted_dates = sorted(daily.keys())
@@ -395,10 +477,15 @@ def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
 
     for origin_d in sorted_dates:
         target_d = origin_d + timedelta(days=1)
-        lag7_d = target_d - timedelta(days=7)  # == origin_d - 6 days
+        # Same weekday 7 days before target_d corresponds to (origin_d - 6 days)
+        lag7_d = target_d - timedelta(days=7)
+
+        # Skip boundaries where tomorrow (`target_d`) or the 7-day baseline (`lag7_d`) is absent
+        # (e.g., first 6 days of Jan 2018, or adjacent to missing date 2026-10-30).
         if target_d not in daily or lag7_d not in daily:
             continue
 
+        # Collect days [d-5 .. d-1] (robust to a single missing intermediate day)
         past_2to6_loads = [
             daily[origin_d - timedelta(days=k)]["load_24"]
             for k in range(1, 6)
@@ -407,6 +494,7 @@ def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
         if not past_2to6_loads:
             continue
 
+        # Collect the full trailing 7-day window [d-6 .. d] available at forecast issuance
         roll_7d_loads = [
             daily[origin_d - timedelta(days=k)]["load_24"]
             for k in range(0, 7)
@@ -437,12 +525,14 @@ def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
         )
         cal_vec = _calendar_features(target_d, daily[target_d]["is_dst_transition"])
 
+        # Concatenate all 67 causal predictors into one row vector for origin_d -> target_d
         feat_vec = np.concatenate([lag_1d_vec, lag_7d_vec, summary_2to6, summary_7d, cal_vec])
         x_rows.append(feat_vec)
         y_rows.append(daily[target_d]["load_24"])
         ub_weather_rows.append(daily[target_d]["weather_summary"])
         origin_dates.append(origin_d.isoformat())
         target_dates.append(target_d.isoformat())
+        # Assign sample split according to the target day being predicted
         sample_splits.append(daily[target_d]["split"])
         uri_masks.append(daily[target_d]["is_uri"] or daily[origin_d]["is_uri"])
         dst_masks.append(daily[target_d]["is_dst_transition"])
@@ -452,7 +542,8 @@ def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
     upper_bound_weather_only = np.vstack(ub_weather_rows)
     splits_arr = np.array(sample_splits)
 
-    # Leakage Control: fit scaler strictly on training samples (2018-2023)
+    # Leakage Control #2: Compute mean & std strictly from `train` rows (2018-2023),
+    # guarding near-zero-variance features with a 1.0 denominator before scaling all splits.
     train_idx = splits_arr == "train"
     scaler_mean = np.mean(X_raw[train_idx], axis=0)
     scaler_std = np.std(X_raw[train_idx], axis=0)
@@ -476,7 +567,7 @@ def split_and_prepare_features(system_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_system_csv(system_data: dict[str, Any], out_csv_path: Path) -> None:
-    """Save the deduplicated 77,496-row hourly system time series to CSV."""
+    """Export the deduplicated 77,496-row hourly system series and zone loads to CSV."""
     out_csv_path = Path(out_csv_path)
     out_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -514,7 +605,12 @@ def save_system_csv(system_data: dict[str, Any], out_csv_path: Path) -> None:
 
 
 def build_feature_dict_from_raw(raw_csv_path: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Convenience helper returning (system_data, audit_summary, dataset_bundle)."""
+    """Run audit, deduplication, and feature generation end-to-end from the raw CSV path.
+
+    Returns:
+        `(system_data, audit_summary, dataset_bundle)` with day-ahead split counts attached
+        to `audit_summary`.
+    """
     system_data, audit_summary = audit_and_deduplicate(raw_csv_path)
     dataset_bundle = split_and_prepare_features(system_data)
     splits = dataset_bundle["splits"]

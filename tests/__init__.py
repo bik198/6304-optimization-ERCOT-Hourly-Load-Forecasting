@@ -1,1 +1,1 @@
-"""Unit test package for ERCOT Step 0+."""
+"""Unit test package for verifying data integrity, leakage guards, and optimization pipelines."""

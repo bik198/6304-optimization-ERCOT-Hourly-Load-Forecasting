@@ -1,4 +1,14 @@
-"""Step 0 runner: audit ERCOT table, deduplicate system series, export splits, and render Dark Carbon EDA plots."""
+"""Step 0 entry-point script: audit raw data, export clean datasets, and generate EDA figures.
+
+Usage:
+    python step0_base_audit.py
+
+Outputs generated:
+    - `data/ercot_system_hourly.csv`      : Deduplicated 77,496-row hourly system table
+    - `data/ercot_step0_features.npz`     : Cached NumPy arrays for Steps 1-5 modeling
+    - `outputs/step0_audit_summary.json`  : Verified dataset statistics & split counts
+    - `figures/fig1..fig4.png`            : Four Dark Carbon EDA visualizations (Proposal Sec. 3.3)
+"""
 
 from __future__ import annotations
 
@@ -8,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib
+# Use non-interactive Agg backend so plotting works headlessly without opening GUI windows
 matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -26,7 +37,11 @@ from src.data_pipeline import build_feature_dict_from_raw, save_system_csv
 
 
 def _apply_dark_carbon_style(ax: plt.Axes, fig: plt.Figure) -> None:
-    """Apply Antigravity Dark Carbon theme (GEMINI.md) to figure and axes."""
+    """Style a matplotlib figure/axes pair using the Antigravity Dark Carbon palette.
+
+    Enforces neutral carbon gray surfaces (#181818 outer shell, #1F1F1F canvas,
+    #2B2B2B gridlines) paired with bright White/Blue/Yellow typography.
+    """
     fig.patch.set_facecolor(PAL["bg_darkest"])
     ax.set_facecolor(PAL["bg_primary"])
     ax.grid(True, color=PAL["bg_card"], linestyle="-", linewidth=0.7, alpha=0.9)
@@ -40,23 +55,29 @@ def _apply_dark_carbon_style(ax: plt.Axes, fig: plt.Figure) -> None:
 
 
 def _plot_fig1_weekly_load(system_data: dict[str, Any], out_path: Path) -> None:
-    """Plot weekly average ERCOT system load with Train/Val/Test bands and Winter Storm Uri."""
+    """Render Figure 1 (Proposal Sec. 3.3): Weekly average ERCOT load from 2018 to 2026.
+
+    Overlays shaded chronological split regions (Train / Validation / Test) and
+    highlights the February 2021 Winter Storm Uri spike for context.
+    """
     timestamps = [datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") for ts in system_data["timestamp"]]
     loads = system_data["system_total_mw"]
     uri_flags = system_data["uri_flag"]
 
-    # Group into ISO year-week buckets in chronological order
+    # Aggregate hourly MW values into ISO calendar year-week buckets in chronological order
     week_buckets: dict[tuple[int, int], list[tuple[datetime, float]]] = {}
     for dt, val in zip(timestamps, loads):
         iso = dt.isocalendar()
         week_buckets.setdefault((iso.year, iso.week), []).append((dt, float(val)))
 
+    # Use the first timestamp of each week as its x-axis coordinate and mean MW as y-value
     week_dates = [pts[0][0] for pts in week_buckets.values()]
     week_means = np.array([np.mean([p[1] for p in pts]) for pts in week_buckets.values()])
 
     fig, ax = plt.subplots(figsize=(11, 4.4), dpi=160)
     _apply_dark_carbon_style(ax, fig)
 
+    # Shaded chronological split spans matching Proposal Section 3.2
     val_dt = datetime(2024, 1, 1)
     test_dt = datetime(2026, 1, 1)
     uri_start = datetime(2021, 2, 14)
@@ -67,11 +88,12 @@ def _plot_fig1_weekly_load(system_data: dict[str, Any], out_path: Path) -> None:
     ax.axvspan(test_dt, week_dates[-1], color="#323234", alpha=0.65, label="Test (2026)")
     ax.axvspan(uri_start, uri_end, color=PAL["text_red"], alpha=0.35, label="Winter Storm Uri (Feb 2021)")
 
+    # Plot weekly mean trend and vertical dashed split markers
     ax.plot(week_dates, week_means, color=PAL["text_link"], linewidth=1.6, label="Weekly Avg System Load")
     ax.axvline(val_dt, color=PAL["text_gold"], linestyle="--", linewidth=1.1)
     ax.axvline(test_dt, color=PAL["text_yellow"], linestyle="--", linewidth=1.1)
 
-    # Highlight Uri spike
+    # Annotate the Winter Storm Uri hourly peak (69,692 MW) pointing to Feb 2021 weekly spike
     uri_vals = loads[uri_flags]
     if uri_vals.size > 0:
         ax.annotate(
@@ -103,10 +125,15 @@ def _plot_fig1_weekly_load(system_data: dict[str, Any], out_path: Path) -> None:
 
 
 def _plot_fig2_hourly_profile(system_data: dict[str, Any], out_path: Path) -> None:
-    """Plot average system load by hour of day (0-23) with IQR band."""
+    """Render Figure 2 (Proposal Sec. 3.3): Diurnal demand profile by hour of day (00-23).
+
+    Shows the mean load curve alongside the 25th-75th percentile band so overnight
+    charging troughs (~03:00) and afternoon discharging peaks (~17:00) stand out.
+    """
     hours = np.array([int(ts[11:13]) for ts in system_data["timestamp"]], dtype=np.int32)
     loads = system_data["system_total_mw"]
 
+    # Compute mean and interquartile spread across all years for each clock hour 0..23
     hr_axis = np.arange(24)
     means = np.array([np.mean(loads[hours == h]) for h in hr_axis])
     q25 = np.array([np.percentile(loads[hours == h], 25) for h in hr_axis])
@@ -118,6 +145,7 @@ def _plot_fig2_hourly_profile(system_data: dict[str, Any], out_path: Path) -> No
     ax.fill_between(hr_axis, q25, q75, color=PAL["text_blue"], alpha=0.22, label="Interquartile Range (25th-75th pct)")
     ax.plot(hr_axis, means, color=PAL["text_yellow"], marker="o", markersize=5, linewidth=2.0, label="Mean System Load")
 
+    # Mark daily average peak (battery discharge target) and trough (battery charge window)
     peak_hr = int(np.argmax(means))
     trough_hr = int(np.argmin(means))
     ax.scatter([peak_hr], [means[peak_hr]], color=PAL["text_red"], s=65, zorder=5)
@@ -156,7 +184,7 @@ def _plot_fig2_hourly_profile(system_data: dict[str, Any], out_path: Path) -> No
 
 
 def _plot_fig3_monthly_profile(system_data: dict[str, Any], out_path: Path) -> None:
-    """Plot average system load by calendar month (Jan-Dec)."""
+    """Render Figure 3 (Proposal Sec. 3.3): Average ERCOT demand by calendar month (Jan-Dec)."""
     months = np.array([int(ts[5:7]) for ts in system_data["timestamp"]], dtype=np.int32)
     loads = system_data["system_total_mw"]
 
@@ -166,12 +194,14 @@ def _plot_fig3_monthly_profile(system_data: dict[str, Any], out_path: Path) -> N
     fig, ax = plt.subplots(figsize=(9.5, 4.2), dpi=160)
     _apply_dark_carbon_style(ax, fig)
 
+    # Highlight peak summer AC months (Jul/Aug in gold, Jun/Sep in sky blue, rest standard blue)
     bar_colors = [
         PAL["text_gold"] if m in (7, 8) else (PAL["text_blue"] if m in (6, 9) else PAL["text_link"])
         for m in range(1, 13)
     ]
     bars = ax.bar(month_names, m_means, color=bar_colors, edgecolor=PAL["border_input"], linewidth=0.9, width=0.68)
 
+    # Place compact MW labels ("61.2k") cleanly above each bar
     for bar, val in zip(bars, m_means):
         ax.text(
             bar.get_x() + bar.get_width() / 2.0,
@@ -193,7 +223,7 @@ def _plot_fig3_monthly_profile(system_data: dict[str, Any], out_path: Path) -> N
 
 
 def _plot_fig4_distribution_and_uri(system_data: dict[str, Any], out_path: Path) -> None:
-    """Plot hourly load distribution with peak callout and Winter Storm Uri zoom."""
+    """Render Figure 4: Side-by-side load histogram and Feb 2021 Winter Storm Uri zoom."""
     loads = system_data["system_total_mw"]
     uri_flags = system_data["uri_flag"]
     timestamps = [datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") for ts in system_data["timestamp"]]
@@ -202,7 +232,7 @@ def _plot_fig4_distribution_and_uri(system_data: dict[str, Any], out_path: Path)
     _apply_dark_carbon_style(ax_left, fig)
     _apply_dark_carbon_style(ax_right, fig)
 
-    # Left panel: Overall Load Histogram + Uri overlay
+    # Left subplot: Distribution of all 77,496 hourly demands with extreme tail markers
     bins = np.linspace(float(np.min(loads)), float(np.max(loads)), 55)
     ax_left.hist(loads, bins=bins, color=PAL["text_blue"], alpha=0.72, edgecolor=PAL["bg_darkest"], label="All Hours (77,496)")
     ax_left.hist(loads[uri_flags], bins=bins, color=PAL["text_red"], alpha=0.85, edgecolor=PAL["bg_darkest"], label="Winter Storm Uri (168h)")
@@ -215,7 +245,7 @@ def _plot_fig4_distribution_and_uri(system_data: dict[str, Any], out_path: Path)
     ax_left.set_ylabel("Hour Count", fontsize=9.5, fontweight="bold")
     ax_left.legend(loc="upper right", fontsize=7.8, facecolor=PAL["bg_card"], edgecolor=PAL["border_input"], labelcolor=PAL["text_main"])
 
-    # Right panel: Winter Storm Uri window (Feb 11-24, 2021)
+    # Right subplot: Feb 11-24, 2021 zoom highlighting the flagged Uri blackout drop (Feb 14-20)
     win_start = datetime(2021, 2, 11)
     win_end = datetime(2021, 2, 24, 23)
     mask = np.array([(win_start <= dt <= win_end) for dt in timestamps], dtype=bool)
@@ -241,24 +271,30 @@ def _plot_fig4_distribution_and_uri(system_data: dict[str, Any], out_path: Path)
 
 
 def run_step0() -> dict[str, Any]:
-    """Execute full Step 0 audit, export artifacts, render EDA plots, and return audit summary."""
+    """Execute the full Step 0 pipeline: audit, export datasets, plot EDA, and print summary."""
+    # Ensure output directories exist before writing artifacts
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     FEATURES_NPZ_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+    # Step 1: Read raw 619,968-row CSV, deduplicate to 77,496 hours, and build causal tensors
     system_data, audit_summary, dataset_bundle = build_feature_dict_from_raw(RAW_CSV_PATH)
-    save_system_csv(system_data, SYSTEM_CSV_PATH)
 
+    # Step 2: Export clean hourly CSV (tracked in git) and compressed NPZ cache (gitignored)
+    save_system_csv(system_data, SYSTEM_CSV_PATH)
     np.savez_compressed(FEATURES_NPZ_PATH, **dataset_bundle)
 
+    # Step 3: Persist human- & machine-readable audit report JSON
     with AUDIT_JSON_PATH.open("w", encoding="utf-8") as f:
         json.dump(audit_summary, f, indent=2)
 
+    # Step 4: Generate all four Dark Carbon Exploratory Data Analysis charts
     _plot_fig1_weekly_load(system_data, FIGURES_DIR / "fig1_weekly_avg_load.png")
     _plot_fig2_hourly_profile(system_data, FIGURES_DIR / "fig2_hourly_load_profile.png")
     _plot_fig3_monthly_profile(system_data, FIGURES_DIR / "fig3_monthly_load_profile.png")
     _plot_fig4_distribution_and_uri(system_data, FIGURES_DIR / "fig4_load_distribution_and_uri.png")
 
+    # Step 5: Print concise verification report to terminal
     print("=" * 72)
     print("STEP 0 AUDIT & LEAKAGE-SAFE PIPELINE COMPLETE")
     print("=" * 72)
