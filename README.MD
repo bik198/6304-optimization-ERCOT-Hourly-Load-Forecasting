@@ -1,1 +1,1 @@
-6304-ERCOT Data Optimization
+6304-ERCOT Data Optimization Ryan Bui
