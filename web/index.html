@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- the page has its own dark theme: ask the Dark Reader extension not to recolour it -->
+    <meta name="darkreader-lock" />
+    <meta name="description" content="ERCOT hourly system load, 2018-01-01 to 2026-11-04." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111214'/%3E%3Cpath d='M5 21 L10 17 L14 19 L19 10 L23 14 L27 8' fill='none' stroke='%23c9a25e' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+    <title>GridStory · ERCOT Load</title>
+    <script>
+      // apply the stored theme (or the OS preference) before first paint
+      (function () {
+        var t = null;
+        try { t = localStorage.getItem('gridstory.theme'); } catch (e) {}
+        if (t !== 'light' && t !== 'semi' && t !== 'dark') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.dataset.theme = t;
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
