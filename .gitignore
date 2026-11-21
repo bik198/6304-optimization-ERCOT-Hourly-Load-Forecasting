@@ -18,3 +18,7 @@ data/*.npz
 Thumbs.db
 .vscode/
 .idea/
+
+# Web story (Vite) build output & dependencies
+web/node_modules/
+web/dist/

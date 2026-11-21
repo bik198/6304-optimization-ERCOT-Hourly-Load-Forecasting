@@ -66,6 +66,7 @@ Day-ahead feature matrix shape: `(3,221, 67)` $\to$ 24-hour target `(3,221, 24)`
 ├── MASTER_PLAN.md                  # Full 6-step engineering & video roadmap
 ├── README.md
 ├── step0_base_audit.py             # Step 0 audit, feature builder & EDA plot generator
+├── export_web_data.py              # Reduces the hourly CSV to web/public/data/eda.json for the web story
 ├── src/
 │   ├── __init__.py
 │   ├── config.py                   # Paths, schema constants, splits, battery QP defaults & palette
@@ -79,9 +80,12 @@ Day-ahead feature matrix shape: `(3,221, 67)` $\to$ 24-hour target `(3,221, 24)`
 │   ├── fig2_hourly_load_profile.png
 │   ├── fig3_monthly_load_profile.png
 │   └── fig4_load_distribution_and_uri.png
-└── tests/
-    ├── __init__.py
-    └── test_step0.py               # Audit, split ordering, and zero-leakage unit tests
+├── tests/
+│   ├── __init__.py
+│   └── test_step0.py               # Audit, split ordering, and zero-leakage unit tests
+└── web/                            # GridStory: the scroll-through visual story (Vite + React)
+    ├── public/data/eda.json        # Aggregates written by export_web_data.py
+    └── src/                        # App, chapters, SVG charts
 ```
 
 ---
@@ -96,3 +100,19 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
 > **Note:** On Windows environments where Application Control blocks `pandas` C-extensions (`nattype`), `src/data_pipeline.py` uses Python's standard `csv` module + `numpy` directly so Step 0 runs with zero `pandas` dependency.
+
+---
+
+## Web Story (GridStory)
+
+`web/` is a single scrolling page on a flat white grid. It covers the Step 0 EDA in nine chapters (data audit, growth, daily cycle, month × hour, load vs temperature, zones, Winter Storm Uri, load distribution, chronological splits) and lists Steps 1–6 as planned. Text states data values and project-doc facts only. A switch in the top bar picks Light, Semi-light or Dark (stored per browser; defaults to the OS setting).
+
+```powershell
+python export_web_data.py     # refresh web/public/data/eda.json (uses pandas)
+cd web
+npm install
+npm run dev                   # http://localhost:4501
+npm run build                 # static site in web/dist/
+```
+
+Every chart has hover tooltips and a "Show the numbers" table view.
