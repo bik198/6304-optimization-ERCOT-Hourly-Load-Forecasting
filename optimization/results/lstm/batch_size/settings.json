@@ -1,0 +1,80 @@
+{
+  "configs": {
+    "16": {
+      "mode": "day",
+      "lookback": 14,
+      "level_days": 7,
+      "hidden": 64,
+      "layers": 2,
+      "dropout": 0.2,
+      "head_units": 128,
+      "optimizer": "sgd_nesterov",
+      "lr": 0.03,
+      "momentum": 0.9,
+      "batch": 16,
+      "wd": 0.0,
+      "clip": 1.0,
+      "lr_factor": 0.5,
+      "lr_patience": 8,
+      "max_epochs": 200,
+      "patience": 25
+    },
+    "32": {
+      "mode": "day",
+      "lookback": 14,
+      "level_days": 7,
+      "hidden": 64,
+      "layers": 2,
+      "dropout": 0.2,
+      "head_units": 128,
+      "optimizer": "sgd_nesterov",
+      "lr": 0.03,
+      "momentum": 0.9,
+      "batch": 32,
+      "wd": 0.0,
+      "clip": 1.0,
+      "lr_factor": 0.5,
+      "lr_patience": 8,
+      "max_epochs": 200,
+      "patience": 25
+    },
+    "64": {
+      "mode": "day",
+      "lookback": 14,
+      "level_days": 7,
+      "hidden": 64,
+      "layers": 2,
+      "dropout": 0.2,
+      "head_units": 128,
+      "optimizer": "sgd_nesterov",
+      "lr": 0.03,
+      "momentum": 0.9,
+      "batch": 64,
+      "wd": 0.0,
+      "clip": 1.0,
+      "lr_factor": 0.5,
+      "lr_patience": 8,
+      "max_epochs": 200,
+      "patience": 25
+    }
+  },
+  "seeds": [
+    42,
+    7,
+    2026
+  ],
+  "environment_and_inputs": {
+    "device": "cpu",
+    "threads": 4,
+    "python": "3.14.10",
+    "processor": "AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD",
+    "torch": "2.15.0+cpu",
+    "numpy": "2.5.4",
+    "pandas": "3.1.1",
+    "inputs": {
+      "ercot_lstm_forecast.ipynb": "05c9ef6d47bd255b12108da4e34ac9fda3603c45a49a1bb1f1133d064287b895",
+      "ercot_system_hourly_cleaned.csv": "59be15d866009592d596042ff24784306da91d01e898f890eb5fb18db16056b2",
+      "lstm_config.json": "58606e21438eb5afe7fdb012ede4a3f0a869e26d27459179e57956a32d462a8a"
+    }
+  }
+}

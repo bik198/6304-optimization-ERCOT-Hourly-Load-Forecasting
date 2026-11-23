@@ -1,0 +1,3 @@
+method,mean_validation_mae_mw,sd_validation_mae_mw
+Armijo GD,2015.1691877870587,16.08075399883416
+Mini-batch SGD,1781.1212139473053,4.658460376503779

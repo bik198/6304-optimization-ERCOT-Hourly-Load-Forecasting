@@ -1,0 +1,27 @@
+{
+  "name": "original",
+  "config": {
+    "mode": "day",
+    "lookback": 14,
+    "level_days": 7,
+    "hidden": 64,
+    "layers": 2,
+    "dropout": 0.2,
+    "head_units": 128,
+    "optimizer": "sgd_nesterov",
+    "lr": 0.03,
+    "momentum": 0.9,
+    "batch": 32,
+    "wd": 0.0,
+    "clip": 1.0,
+    "lr_factor": 0.5,
+    "lr_patience": 8,
+    "max_epochs": 200,
+    "patience": 25
+  },
+  "seeds": [
+    42,
+    7,
+    2026
+  ]
+}

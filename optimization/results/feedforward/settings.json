@@ -1,0 +1,58 @@
+{
+  "notebook": "optimization/feedforward_optimizers.ipynb",
+  "feature_source": "proposal\\ercot_model_table.csv",
+  "architecture": [
+    67,
+    64,
+    24
+  ],
+  "activation": "ReLU",
+  "dtype": "float64",
+  "seed": 42,
+  "passes": 100,
+  "batch_size": 32,
+  "cpu_threads": 1,
+  "armijo": {
+    "initial_step": 1.0,
+    "shrink": 0.5,
+    "sufficient_decrease": 0.0001,
+    "max_search": 50
+  },
+  "sgd_learning_rates": [
+    0.001,
+    0.01,
+    0.03
+  ],
+  "sgd_total_selection_seconds": 8.389015499735251,
+  "selection": [
+    {
+      "method": "Armijo GD",
+      "learning_rate": null,
+      "best_pass": 100,
+      "validation_mae_mw": 2033.0850589608635,
+      "optimizer_seconds": 0.4212961995508522,
+      "run_seconds": 0.564647699939087,
+      "gradient_evaluations": 100,
+      "line_search_evaluations": 185
+    },
+    {
+      "method": "SGD 0.03",
+      "learning_rate": 0.03,
+      "best_pass": 98,
+      "validation_mae_mw": 1777.3804750351267,
+      "optimizer_seconds": 2.6148079009726644,
+      "run_seconds": 2.7916057999245822,
+      "gradient_evaluations": 6900,
+      "line_search_evaluations": 0
+    }
+  ],
+  "environment": {
+    "python": "3.14.10",
+    "processor": "AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "torch": "2.15.0+cpu",
+    "numpy": "2.5.4",
+    "pandas": "3.1.1",
+    "matplotlib": "3.11.2"
+  }
+}
