@@ -87,7 +87,10 @@ export function Tooltip({ x, y, width, children }) {
   const ref = useRef(null);
   const [size, setSize] = useState({ w: 160, h: 60 });
   useLayoutEffect(() => {
-    if (ref.current) setSize({ w: ref.current.offsetWidth, h: ref.current.offsetHeight });
+    if (!ref.current) return;
+    const w = ref.current.offsetWidth, h = ref.current.offsetHeight;
+    // Keep the same object when nothing changed: a new object each render would re-render forever.
+    setSize(s => (s.w === w && s.h === h ? s : { w, h }));
   });
   const left = x + 14 + size.w > width ? x - 14 - size.w : x + 14;
   const top = Math.max(0, y - size.h - 10);

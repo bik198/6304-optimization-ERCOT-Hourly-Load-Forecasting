@@ -1,13 +1,15 @@
 {
-  "name": "ercot-gridstory",
+  "name": "ercot-beadline",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "GridStory: the visual story of ERCOT hourly load, forecasting and battery dispatch.",
+  "description": "Beadline: two-mode story + necklace explorer with Present mode, synced Presenter view, offline single-file build, and PDF export.",
   "scripts": {
-    "data": "cd .. && python export_web_data.py",
+    "data": "cd .. && python export_web_data.py && python export_beads_data.py && python export_story_data.py",
     "dev": "vite",
     "build": "vite build",
+    "offline": "vite build && node scripts/bundle_offline.mjs",
+    "pdf": "vite build && node scripts/export_pdf.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
