@@ -1,249 +1,567 @@
-// GridStory: the ERCOT project as a single scrolling page on a flat white grid.
-// Step 0 (EDA) chapters are live; later steps are listed until their data exists.
-import { useEffect, useState } from 'react';
-import Chapter from './story/Chapter';
-import ThemeSwitch from './story/ThemeSwitch';
-import { Figure, SPLIT_COLOR, SPLIT_LABEL, fmtGW, fmtInt, hourLabel } from './charts/kit';
-import { GrowthTimeline, YearlyColumns } from './charts/growth';
-import { HourProfile, MonthHourHeatmap } from './charts/daily';
-import { TemperatureCurve, UriPanels } from './charts/weather';
-import { ZoneGrowth, ZoneShare } from './charts/zones';
-import { LoadHistogram } from './charts/tail';
-import { SplitBar, SplitRange } from './charts/splits';
+// Beadline: Generic Two-Mode + Present Explorer
+//   - Read Mode    : linear 00 -> N sidebar rail + full context paragraph + Proof drawers
+//   - Present Mode : (F) hides sidebar, moves paragraph to Notes, fits chart above fold, click-to-reveal (1->2->3)
+//   - Presenter    : (P or ?presenter=1) second window with timer, Say-out-loud cue, notes & next scene via BroadcastChannel
+//   - Machine Mode : (M) full-screen horizontal necklace strands + bundled cables + scene focus
+//   - Depth Zoom   : (↓ / ↑) Story/DAG -> Code -> Numbers -> 64-bit IEEE-754 Bits
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import CodeLayer from './beadline/CodeLayer';
+import NumbersLayer from './beadline/NumbersLayer';
+import BinaryLayer from './beadline/BinaryLayer';
+import MachineCanvas from './beadline/MachineCanvas';
+import StoryRail from './story/StoryRail';
+import StopView, { colorForPart } from './story/StopView';
+import Overview from './story/Overview';
+import PresenterView from './story/PresenterView';
+import PrintDeck from './story/PrintDeck';
 
-const CHAPTERS = [
-  ['data', 'Data'], ['growth', 'Growth'], ['day', 'Day'], ['year', 'Year'], ['weather', 'Weather'],
-  ['zones', 'Zones'], ['uri', 'Uri'], ['tail', 'Tail'], ['splits', 'Splits'], ['next', 'Next'],
-];
+const pad = n => String(n).padStart(2, '0');
+const CHANNEL_NAME = 'beadline-sync';
 
-const NEXT_STEPS = [
-  ['Step 1', 'Baselines', 'Previous-day and previous-week seasonal-naive forecasts; AR(p) with AIC order selection, ACF/PACF and Ljung-Box checks.'],
-  ['Step 2', 'Ridge & SVR', 'Multi-output Ridge and RBF-SVR; gradient descent vs conjugate gradient on the Ridge objective.'],
-  ['Step 3', 'LSTM & optimizers', 'PyTorch LSTM; full-batch gradient descent with backtracking vs mini-batch SGD on a fixed feed-forward network.'],
-  ['Step 4', 'Battery dispatch', 'Convex QP (CVXPY) over hourly charge, discharge and state of charge: daily peak plus wear penalty.'],
-  ['Step 5', 'Regret', 'Each model’s test forecasts through the same QP: peak reduction, throughput, feasibility, regret vs perfect foresight.'],
-  ['Step 6', 'Motion', '60 fps motion-graphics video rendered from the JSON outputs of Steps 1–5.'],
-];
+class StopBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error) { console.error(error); }
+  render() {
+    if (this.state.error) {
+      return <div className="stop-error">This view failed to render: {String(this.state.error.message || this.state.error)}</div>;
+    }
+    return this.props.children;
+  }
+}
 
-const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
-const toMs = t => Date.parse(t.replace(' ', 'T'));
-const fmtHour = t => new Date(t.replace(' ', 'T')).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric' });
+function useJson(name) {
+  const inline = typeof window !== 'undefined' ? window.__BEADLINE_INLINE_DATA__?.[name] : null;
+  const [value, setValue] = useState(inline || null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    if (inline) return;
+    fetch(`${import.meta.env.BASE_URL}data/${name}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(setValue)
+      .catch(e => setError(e.message));
+  }, [name, inline]);
+  return [value, error];
+}
 
 export default function App() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
+  const [beadData, beadErr] = useJson('beads.json');
+  const [story, storyErr] = useJson('story.json');
+  const [eda] = useJson('eda.json');
+
+  const params = new URLSearchParams(window.location.search);
+  const isPresenterWindow = params.get('presenter') === '1';
+  const isPrintDeck = params.get('print') === '1';
+
+  const [mode, setMode] = useState(() => (params.get('mode') === 'machine' ? 'machine' : 'story'));
+  const [index, setIndex] = useState(Number(params.get('stop')) || 0);
+  const [depth, setDepth] = useState(Number(params.get('depth')) || 0);
+  const [present, setPresent] = useState(params.get('present') === '1');
+  const [reveal, setReveal] = useState(() => {
+    const stepParam = Number(params.get('step'));
+    if (stepParam >= 1 && stepParam <= 3) return stepParam;
+    return params.get('present') === '1' ? 1 : 3;
+  });
+  const [drillBead, setDrillBead] = useState(null);
+  const [focusScene, setFocusScene] = useState(null);
+  const [mapGroup, setMapGroup] = useState(null); // Code Steps: null = group map, else the open group
+  const [showNotes, setShowNotes] = useState(params.get('notes') === '1');
+  const [inspected, setInspected] = useState({ val: 1691.65, label: 'LSTM test MAE' });
+  const [theme, setTheme] = useState(() => params.get('theme') || localStorage.getItem('beadline-theme') || 'dark');
+  const channelRef = useRef(null);
 
   useEffect(() => {
-    fetch(`${import.meta.env.BASE_URL}data/eda.json`)
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then(setData)
-      .catch(e => setError(e.message));
+    if (!isPrintDeck) {
+      document.documentElement.dataset.theme = theme;
+      localStorage.setItem('beadline-theme', theme);
+    }
+  }, [theme, isPrintDeck]);
+
+  useEffect(() => {
+    if (story?.project?.docTitle) document.title = story.project.docTitle;
+    if (!drillBead && story?.project?.defaultBead) setDrillBead(story.project.defaultBead);
+  }, [story, drillBead]);
+
+  const stops = story?.stops || [];
+  const parts = story?.parts || [];
+  const partColorFn = useCallback(
+    partId => colorForPart(parts.find(p => p.id === partId)),
+    [parts],
+  );
+
+  const stop = mode === 'story' && index > 0 ? stops[index - 1] : null;
+  const part = stop ? parts.find(p => p.id === stop.part) : null;
+  const defaultBeadName = story?.project?.defaultBead || beadData?.beads?.[0]?.name;
+  const activeBeadName = mode === 'machine'
+    ? (drillBead || defaultBeadName)
+    : (depth > 0 && drillBead ? drillBead : stop?.bead || null);
+  const activeBead = beadData?.beads.find(b => b.name === activeBeadName);
+  const canDrill = mode === 'machine' ? !!activeBead : !!(stop?.bead || (depth > 0 && activeBead));
+  const strandOf = useCallback(name => beadData?.beads.find(b => b.name === name)?.strand ?? null, [beadData]);
+
+  const goStop = useCallback((i, initialReveal) => {
+    setMode('story');
+    const clamped = Math.max(0, Math.min(stops.length, i));
+    setIndex(clamped);
+    setDepth(0);
+    setReveal(initialReveal ?? (present && clamped > 0 ? 1 : 3));
+    if (clamped > 0 && stops[clamped - 1]?.bead) {
+      setDrillBead(stops[clamped - 1].bead);
+    }
+  }, [stops, present]);
+
+  const stepNext = useCallback(() => {
+    if (present && index > 0 && reveal < 3) {
+      setReveal(r => Math.min(3, r + 1));
+    } else if (index < stops.length) {
+      goStop(index + 1, present ? 1 : 3);
+    }
+  }, [present, index, reveal, stops.length, goStop]);
+
+  const stepPrev = useCallback(() => {
+    if (present && index > 0 && reveal > 1) {
+      setReveal(r => Math.max(1, r - 1));
+    } else if (index > 0) {
+      goStop(index - 1, present && index - 1 > 0 ? 3 : 3);
+    }
+  }, [present, index, reveal, goStop]);
+
+  const togglePresent = useCallback(() => {
+    setPresent(prev => {
+      const next = !prev;
+      setMode('story');
+      setDepth(0);
+      if (next) {
+        if (index === 0 && stops.length > 0) {
+          setIndex(1);
+          setReveal(1);
+        } else {
+          setReveal(1);
+        }
+      } else {
+        setReveal(3);
+      }
+      return next;
+    });
+  }, [index, stops.length]);
+
+  const openMachineFromScene = useCallback((sceneStop, sceneNum, color) => {
+    const members = sceneStop.beads?.length ? sceneStop.beads : (sceneStop.bead ? [sceneStop.bead] : []);
+    if (sceneStop.bead) setDrillBead(sceneStop.bead);
+    setFocusScene({ num: sceneNum, title: sceneStop.title, beads: members, color });
+    setMapGroup(strandOf(sceneStop.bead));
+    setMode('machine');
+    setDepth(0);
+  }, [strandOf]);
+
+  const openMachineBead = useCallback(beadName => {
+    if (beadName) setDrillBead(beadName);
+    else if (stop?.bead) setDrillBead(stop.bead);
+    if (stop && index > 0) {
+      const members = stop.beads?.length ? stop.beads : (stop.bead ? [stop.bead] : []);
+      setFocusScene({ num: index, title: stop.title, beads: members, color: colorForPart(part) });
+      setMapGroup(strandOf(beadName || stop.bead));
+    } else {
+      setFocusScene(null);
+      setMapGroup(null);
+    }
+    setMode('machine');
+    setDepth(0);
+  }, [stop, index, part, strandOf]);
+
+  const pickBeadFromOverview = useCallback(name => {
+    const own = stops.findIndex(s => s.bead === name || (s.beads || []).includes(name));
+    if (own >= 0) {
+      goStop(own + 1, 3);
+      return;
+    }
+    setFocusScene(null);
+    setDrillBead(name);
+    setMapGroup(strandOf(name));
+    setMode('machine');
+    setDepth(0);
+  }, [stops, goStop, strandOf]);
+
+  const setDepthSafe = useCallback(d => {
+    const target = Math.max(0, Math.min(3, d));
+    if (mode === 'story' && target > 0 && stop?.bead && (!drillBead || depth === 0)) {
+      setDrillBead(stop.bead);
+    }
+    if (target === 0 || canDrill) setDepth(target);
+  }, [mode, stop, drillBead, depth, canDrill]);
+
+  const openPresenterPopup = useCallback(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('presenter', '1');
+    window.open(url.toString(), 'beadline-presenter', 'width=1020,height=720');
   }, []);
 
+  // Sync projected tab <-> Presenter second window via BroadcastChannel
+  const stateRef = useRef({ index, reveal, present, theme, mode });
+  stateRef.current = { index, reveal, present, theme, mode };
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return undefined;
+    const ch = new BroadcastChannel(CHANNEL_NAME);
+    channelRef.current = ch;
+
+    ch.onmessage = ev => {
+      const msg = ev.data || {};
+      if (isPresenterWindow) {
+        if (msg.type === 'state') {
+          setIndex(msg.index);
+          setReveal(msg.reveal);
+          setPresent(msg.present);
+          setTheme(msg.theme);
+        } else if (msg.type === 'hello-ack') {
+          setIndex(msg.index);
+          setReveal(msg.reveal);
+          setPresent(msg.present);
+          setTheme(msg.theme);
+        }
+      } else {
+        if (msg.type === 'hello') {
+          ch.postMessage({ type: 'hello-ack', ...stateRef.current });
+        } else if (msg.type === 'cmd') {
+          const { cmd } = msg;
+          if (cmd.type === 'step-next') stepNext();
+          else if (cmd.type === 'step-prev') stepPrev();
+          else if (cmd.type === 'goto') goStop(cmd.index, stateRef.current.present && cmd.index > 0 ? 1 : 3);
+          else if (cmd.type === 'toggle-present') togglePresent();
+          else if (cmd.type === 'toggle-theme') setTheme(t => (t === 'light' ? 'dark' : 'light'));
+        }
+      }
+    };
+
+    if (isPresenterWindow) {
+      ch.postMessage({ type: 'hello' });
+    }
+    return () => ch.close();
+  }, [isPresenterWindow, stepNext, stepPrev, goStop, togglePresent]);
+
+  useEffect(() => {
+    if (!isPresenterWindow && channelRef.current) {
+      channelRef.current.postMessage({ type: 'state', index, reveal, present, theme });
+    }
+  }, [isPresenterWindow, index, reveal, present, theme]);
+
+  useEffect(() => {
+    if (isPresenterWindow || isPrintDeck) return undefined;
+    const onKey = e => {
+      if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
+        if (e.key === 'Escape') document.activeElement.blur();
+        return;
+      }
+      if (e.key === 'f' || e.key === 'F') togglePresent();
+      else if (e.key === 'p' || e.key === 'P') openPresenterPopup();
+      else if (e.key === 'm' || e.key === 'M') {
+        if (mode === 'story') openMachineBead(stop?.bead || drillBead);
+        else { setMode('story'); setDepth(0); }
+      } else if (mode === 'story' && (e.key === 'ArrowRight' || e.key === ' ')) stepNext();
+      else if (mode === 'story' && e.key === 'ArrowLeft') stepPrev();
+      else if (mode === 'machine' && depth === 0 && !mapGroup && (e.key === 'ArrowDown' || e.key === 'Enter')) {
+        setMapGroup(activeBead?.strand || null);
+      } else if ((e.key === 'ArrowDown' || e.key === 'Enter') && canDrill && (mode === 'machine' || index > 0)) {
+        setDepthSafe(depth + 1);
+      } else if (e.key === 'ArrowUp' || e.key === 'Escape') {
+        if (depth > 0) setDepthSafe(depth - 1);
+        else if (mode === 'machine' && mapGroup) setMapGroup(null);
+        else if (mode === 'machine') setMode('story');
+        else if (present) { setPresent(false); setReveal(3); }
+      } else if (e.key === 'n' || e.key === 'N') setShowNotes(v => !v);
+      else if (e.key === 't' || e.key === 'T') setTheme(t => (t === 'light' ? 'dark' : 'light'));
+      else if (e.key === 'Home') goStop(0, 3);
+      else return;
+      e.preventDefault();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isPresenterWindow, isPrintDeck, mode, index, depth, present, drillBead, stop, canDrill, goStop, stepNext, stepPrev, togglePresent, openPresenterPopup, openMachineBead, setDepthSafe, mapGroup, activeBead]);
+
+  const error = beadErr || storyErr;
+  if (!beadData || !story) {
+    return (
+      <main className="loading">
+        {error ? `Missing data (${error}). Run: python export_beads_data.py; python export_story_data.py` : 'Loading…'}
+      </main>
+    );
+  }
+
+  if (isPrintDeck) {
+    return <PrintDeck story={story} eda={eda} />;
+  }
+
+  if (isPresenterWindow) {
+    return (
+      <PresenterView
+        story={story}
+        state={{ index, reveal, present, theme }}
+        onCommand={cmd => {
+          if (channelRef.current) channelRef.current.postMessage({ type: 'cmd', cmd });
+          // Also update local preview state if opened standalone
+          if (cmd.type === 'goto') setIndex(cmd.index);
+          else if (cmd.type === 'toggle-theme') setTheme(t => (t === 'light' ? 'dark' : 'light'));
+        }}
+      />
+    );
+  }
+
+  const prevLabel = mode === 'story' && index > 0 ? (index === 1 ? 'Overview' : `${pad(index - 1)} · ${stops[index - 2].title}`) : null;
+  const nextLabel = mode === 'story' && index < stops.length ? `${pad(index + 1)} · ${stops[index].title}` : null;
+  const depthLabels = mode === 'machine' ? ['Map', 'Code', 'Numbers', 'Bits'] : ['Slide', 'Code', 'Numbers', 'Bits'];
+  const setNumber = (val, label) => setInspected({ val, label });
+  const brand = story.project?.brand || 'Beadline';
+  const showSidebar = mode === 'story' && !present;
+
   return (
-    <>
-      <header className="topbar">
-        <a className="brand" href="#top">GridStory<b>.</b></a>
-        <nav className="nav" aria-label="Chapters">
-          {CHAPTERS.map(([id, label]) => <a key={id} href={`#${id}`}>{label}</a>)}
+    <div className={`bl-shell ${present ? 'bl-present' : ''}`} style={{ '--p': stop ? colorForPart(part) : 'var(--btn-primary-bg)' }}>
+      <header className="bl-top">
+        <button type="button" className="brand" onClick={() => { setPresent(false); goStop(0, 3); }}>
+          {brand}<span className="dot">.</span>
+        </button>
+
+        <div className="mode-toggle" role="tablist" aria-label="View mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'story' && !present}
+            className={mode === 'story' && !present ? 'mode-btn active' : 'mode-btn'}
+            onClick={() => { setPresent(false); setReveal(3); setMode('story'); setDepth(0); }}
+          >
+            Slides · {stops.length}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'story' && present}
+            className={mode === 'story' && present ? 'mode-btn active' : 'mode-btn'}
+            onClick={() => { if (!present) togglePresent(); else { setMode('story'); setDepth(0); } }}
+            title="Full-screen layout; each part appears on click (F)"
+          >
+            Present (F)
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'machine'}
+            className={mode === 'machine' ? 'mode-btn active' : 'mode-btn'}
+            onClick={() => openMachineBead(stop?.bead || drillBead)}
+            title="Show all code steps (M)"
+          >
+            Code Steps · {beadData.beads.length}
+          </button>
+        </div>
+
+        <nav className="crumbs" aria-label="You are here">
+          {mode === 'story' ? (
+            <>
+              <button type="button" onClick={() => goStop(0, 3)}>Overview</button>
+              {part && <><i>›</i><span className="crumb-part">Part {part.id} · {part.title}</span></>}
+              {stop && <><i>›</i><button type="button" onClick={() => setDepthSafe(0)}>{pad(index)} · {stop.title}</button></>}
+              {stop && depth > 0 && <><i>›</i><code>{activeBeadName}</code><i>›</i><b>{depthLabels[depth]}</b></>}
+            </>
+          ) : (
+            <>
+              <button type="button" onClick={() => { setDepthSafe(0); setMapGroup(null); }}>Code Steps</button>
+              {(mapGroup || depth > 0) && activeBead && (
+                <>
+                  <i>›</i>
+                  <button type="button" onClick={() => { setDepthSafe(0); setMapGroup(activeBead.strand); }}>
+                    {beadData.strands.find(s => s.id === activeBead.strand)?.label || activeBead.strand}
+                  </button>
+                  <i>›</i><span>{activeBead.title || activeBead.name}</span>
+                </>
+              )}
+              {depth > 0 && <><i>›</i><b>{depthLabels[depth]}</b></>}
+            </>
+          )}
         </nav>
-        <ThemeSwitch />
-        <span className="label">Step 0 · EDA</span>
+
+        <div className="top-right-tools">
+          {mode === 'story' && <span className="stop-counter">{index} / {stops.length}</span>}
+          <button
+            type="button"
+            className="theme-btn"
+            onClick={openPresenterPopup}
+            title="Open speaker notes in a second window (P)"
+          >
+            Speaker View
+          </button>
+          <button
+            type="button"
+            className="theme-btn"
+            onClick={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))}
+            title="Switch theme (T)"
+          >
+            {theme === 'light' ? 'Dark' : 'Light'}
+          </button>
+        </div>
       </header>
 
-      {!data ? (
-        <div className="loading">{error ? `Could not load data/eda.json (${error}). Run: python export_web_data.py` : 'Loading…'}</div>
-      ) : (
-        <Story data={data} />
-      )}
+      <div className={showSidebar ? 'bl-body' : 'bl-body bl-body-full'}>
+        {showSidebar && (
+          <aside className="bl-map">
+            <StoryRail
+              parts={parts}
+              stops={stops}
+              index={index}
+              onGo={i => goStop(i, 3)}
+            />
+          </aside>
+        )}
 
-      <footer className="footer">
-        <span>GridStory · ASDS 6304 · Group 3</span>
-        <span>Data: ERCOT hourly load & zone weather, 2018-01-01 → 2026-11-04</span>
-      </footer>
-    </>
-  );
-}
-
-function Stat({ label, value, note }) {
-  return (
-    <div className="stat">
-      <span className="label">{label}</span>
-      <span className="value">{value}</span>
-      {note && <span className="note">{note}</span>}
-    </div>
-  );
-}
-
-function Story({ data }) {
-  const { meta, yearly, hourly, splits, distribution, zones, uri } = data;
-  const overall = hourly.overall;
-  const troughH = overall.indexOf(Math.min(...overall));
-  const peakH = overall.indexOf(Math.max(...overall));
-  const first = yearly[0];
-  const lastFull = [...yearly].reverse().find(y => !y.partial);
-  const ytd = yearly.find(y => y.partial);
-  const record = yearly.reduce((a, b) => (b.peak > a.peak ? b : a));
-  const summerPeaks = yearly.filter(y => /-0[78]-/.test(y.peakAt) && /(16|17):00$/.test(y.peakAt)).length;
-  const train = splits[0], test = splits[2];
-  const total = splits.reduce((a, s) => a + s.hours, 0);
-  const farWest = zones.growth.find(z => z.zone === 'farWest');
-  const fwShare = k => (zones.meanByYear.farWest[k] / zones.order.reduce((a, z) => a + zones.meanByYear[z][k], 0)) * 100;
-  const winter = hourly.seasons.winter;
-  const wMornH = winter.slice(5, 11).indexOf(Math.max(...winter.slice(5, 11))) + 5;
-  const summer = hourly.seasons.summer;
-  const sPeakH = summer.indexOf(Math.max(...summer));
-  let hm = { m: 0, h: 0 };
-  data.heatmap.forEach((row, mi) => row.forEach((v, h) => { if (v > data.heatmap[hm.m][hm.h]) hm = { m: mi, h }; }));
-  const temps = data.temperature;
-  const tMin = temps.filter(d => d.days >= 20).reduce((a, b) => (b.mean < a.mean ? b : a));
-  const tCold = temps[0], tHot = temps[temps.length - 1];
-  const uriHours = uri.hours.filter(h => h.uri);
-  const uriPeak = uriHours.reduce((a, b) => (b.mw > a.mw ? b : a));
-  const uriAfter = uriHours.filter(h => toMs(h.t) > toMs(uriPeak.t) && toMs(h.t) <= toMs(uriPeak.t) + 48 * 36e5)
-    .reduce((a, b) => (b.mw < a.mw ? b : a));
-  const uriColdest = uri.hours.filter(h => h.temp != null).reduce((a, b) => (b.temp < a.temp ? b : a));
-
-  return (
-    <main id="top" className="story">
-      <section className="intro">
-        <h1>GridStory<span className="dot">.</span></h1>
-        <p>ERCOT hourly system load, {meta.start} → {meta.end}. {fmtInt(meta.hours)} hours, {meta.zones} weather zones.</p>
-        <p>Project goal: forecast the next day's 24 hourly loads, then schedule a battery to reduce the daily peak.</p>
-      </section>
-
-      <Chapter id="data" no="01" eyebrow="The data" title="619,968 rows → 77,496 hours">
-        <p>
-          The raw table has <strong>{fmtInt(meta.rawRows)}</strong> rows: {fmtInt(meta.hours)} hours × {meta.zones} ERCOT weather zones.
-          The system total is identical across all {meta.zones} zone rows (maximum difference: {meta.maxZoneSpread.toFixed(3)} MW). Step 0 keeps one row per hour
-          and builds {fmtInt(meta.samples)} day-ahead samples.
-        </p>
-        <div className="stats">
-          <Stat label="Raw rows" value={fmtInt(meta.rawRows)} note={`${fmtInt(meta.hours)} hours × ${meta.zones} zones`} />
-          <Stat label="Unique hours" value={fmtInt(meta.hours)} note={`${meta.start} → ${meta.end}`} />
-          <Stat label="Day-ahead samples" value={fmtInt(meta.samples)} note={`${meta.features} features → 24 hourly targets`} />
-          <Stat label="Storm hours flagged" value={meta.uriHours} note="Winter Storm Uri, Feb 14–20, 2021" />
-        </div>
-        <ul className="facts">
-          <li><strong>{meta.dstRepeats}</strong> repeated 01:00 hours (daylight-saving fall-back)</li>
-          <li><strong>{meta.missingDates.length}</strong> missing day ({meta.missingDates.join(', ')}), handled in lag construction</li>
-          <li><strong>67</strong> hours without temperature, all in train, filled with train medians</li>
-        </ul>
-      </Chapter>
-
-      <Chapter id="growth" no="02" eyebrow="Growth" title={`Average load: ${fmtGW(first.mean)} → ${fmtGW(lastFull.mean)}`}>
-        <p>
-          Mean hourly load was <strong>{fmtGW(first.mean)}</strong> in {first.year} and <strong>{fmtGW(lastFull.mean)}</strong> in {lastFull.year},
-          a change of +{((lastFull.mean / first.mean - 1) * 100).toFixed(0)}%. The {ytd.year} mean (Jan 1 – Nov 4) is {fmtGW(ytd.mean)}.
-        </p>
-        <GrowthTimeline weekly={data.weekly} splits={splits} uriStart={uri.start} />
-        <div className="stats">
-          <Stat label="Annual peaks in Jul/Aug, 16:00–17:00" value={`${summerPeaks} of ${yearly.length}`} note={`${first.year}–${ytd.year}`} />
-          <Stat label="All-time maximum" value={fmtGW(record.peak)} note={`${record.peakAt} (test split)`} />
-          <Stat label="Mean growth per year" value={`+${(((lastFull.mean / first.mean) ** (1 / (lastFull.year - first.year)) - 1) * 100).toFixed(1)}%`} note={`Compound, ${first.year} → ${lastFull.year}`} />
-        </div>
-        <YearlyColumns yearly={yearly} />
-      </Chapter>
-
-      <Chapter id="day" no="03" eyebrow="The day" title={`Lowest at ${hourLabel(troughH)}, highest at ${hourLabel(peakH)}`}>
-        <p>
-          Mean load by clock hour is lowest at <strong>{hourLabel(troughH)}</strong> ({fmtGW(overall[troughH])}) and highest at <strong>{hourLabel(peakH)}</strong> ({fmtGW(overall[peakH])}),
-          a difference of {((overall[peakH] / overall[troughH] - 1) * 100).toFixed(0)}%. The summer mean peaks at {hourLabel(sPeakH)} ({fmtGW(summer[sPeakH])}).
-          The winter mean has a local maximum at {hourLabel(wMornH)} ({fmtGW(winter[wMornH])}).
-        </p>
-        <HourProfile hourly={hourly} />
-      </Chapter>
-
-      <Chapter id="year" no="04" eyebrow="The year" title={`Highest cell: ${MONTH_NAMES[hm.m]}, ${hourLabel(hm.h)}`}>
-        <p>
-          Mean load for each month × clock hour. The highest cell is <strong>{MONTH_NAMES[hm.m]} at {hourLabel(hm.h)}</strong> ({fmtGW(data.heatmap[hm.m][hm.h])}).
-          The day-ahead feature set includes deterministic calendar features.
-        </p>
-        <MonthHourHeatmap heatmap={data.heatmap} />
-      </Chapter>
-
-      <Chapter id="weather" no="05" eyebrow="Weather" title="Load vs temperature">
-        <p>
-          Daily mean load is lowest in the <strong>{tMin.t} °F</strong> bin ({fmtGW(tMin.mean)}). It is {fmtGW(tHot.mean)} in the {tHot.t} °F bin and {fmtGW(tCold.mean)} in the {tCold.t} °F bin.
-          Observed target-day weather is excluded from the primary forecasting inputs (look-ahead leakage) and kept separately as <code>upper_bound_weather_only</code>.
-        </p>
-        <TemperatureCurve temperature={temps} />
-      </Chapter>
-
-      <Chapter id="zones" no="06" eyebrow="Zones" title="Zone load, 2018 vs 2025">
-        <p>
-          Far West mean load went from {fmtGW(farWest.mw2018)} to {fmtGW(farWest.mw2025)}, <strong>+{farWest.growthPct.toFixed(0)}%</strong>, the largest change of the {meta.zones} zones.
-          Its share of system load went from {fwShare(0).toFixed(1)}% to {fwShare(zones.years.length - 1).toFixed(1)}%.
-        </p>
-        <div className="grid-2">
-          <ZoneGrowth zones={zones} />
-          <ZoneShare zones={zones} />
-        </div>
-      </Chapter>
-
-      <Chapter id="uri" no="07" eyebrow="Extremes" title="Winter Storm Uri, February 2021">
-        <p>
-          The <code>uri_flag</code> covers {meta.uriHours} hours (Feb 14–20, 2021). Load peaked at <strong>{fmtGW(uriPeak.mw)}</strong> ({fmtHour(uriPeak.t)}).
-          Within the next 48 hours it fell to <strong>{fmtGW(uriAfter.mw)}</strong> ({fmtHour(uriAfter.t)}). The lowest zone-average temperature was {uriColdest.temp.toFixed(1)} °F ({fmtHour(uriColdest.t)}).
-        </p>
-        <UriPanels uri={uri} />
-      </Chapter>
-
-      <Chapter id="tail" no="08" eyebrow="The tail" title="Load distribution">
-        <p>
-          Median hourly load: {fmtGW(distribution.p50)}. 99th percentile: <strong>{fmtGW(distribution.p99)}</strong>. Maximum: {fmtGW(distribution.max)}.
-          The five highest hours are all in July–August 2026.
-        </p>
-        <div className="grid-2 wide-left">
-          <LoadHistogram distribution={distribution} />
-          <Figure title="The five highest hours" sub="System load, all 77,496 hours ranked">
-            <ol className="ranked">
-              {distribution.topHours.map((h, i) => (
-                <li key={h.at}><span className="rank">{i + 1}</span><span>{fmtHour(h.at)}, {h.at.slice(0, 4)}</span><span className="mw">{fmtInt(h.mw)} MW</span></li>
-              ))}
-            </ol>
-          </Figure>
-        </div>
-      </Chapter>
-
-      <Chapter id="splits" no="09" eyebrow="Splits" title="Train, validation, test">
-        <p>
-          Chronological splits, no shuffling: train {train.start} → {train.end}, validation {splits[1].start} → {splits[1].end}, test {test.start} → {test.end}.
-          Imputers and scalers are fit on train only. Test peak: <strong>{fmtGW(test.peak)}</strong>. Train peak: {fmtGW(train.peak)}. Difference: +{fmtGW(test.peak - train.peak)}.
-        </p>
-        <Figure
-          title="The 77,496 hours, in time order"
-          sub="Share of hours in each chronological split"
-          legend={<div className="legend">{splits.map(s => <span key={s.split}><i className="box" style={{ background: SPLIT_COLOR[s.split] }} />{SPLIT_LABEL[s.split]}</span>)}</div>}
+        <main
+          className={mode === 'machine' && depth === 0 ? 'bl-main bl-main-dag' : present ? 'bl-main bl-main-present' : 'bl-main'}
+          key={`${mode}-${index}-${depth}-${depth > 0 ? activeBeadName : ''}`}
         >
-          <SplitBar splits={splits} />
-          <table className="data">
-            <thead><tr><th>Split</th><th>Period</th><th>Hours</th><th>Day-ahead samples</th><th>Mean load</th><th>Peak load</th></tr></thead>
-            <tbody>
-              {splits.map(s => (
-                <tr key={s.split}>
-                  <td><i className="swatch" style={{ background: SPLIT_COLOR[s.split] }} />{SPLIT_LABEL[s.split]}</td>
-                  <td>{s.start} → {s.end}</td>
-                  <td>{fmtInt(s.hours)} ({((s.hours / total) * 100).toFixed(0)}%)</td>
-                  <td>{s.days != null ? fmtInt(s.days) : '—'}</td>
-                  <td>{fmtGW(s.mean)}</td>
-                  <td>{fmtGW(s.peak)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Figure>
-        <SplitRange splits={splits} />
-      </Chapter>
+          <StopBoundary>
+            {mode === 'story' && !stop && (
+              <Overview
+                story={story}
+                beads={beadData.beads}
+                eda={eda}
+                onGo={i => goStop(i, 3)}
+                onPick={pickBeadFromOverview}
+                onOpenMachine={name => { setFocusScene(null); setDrillBead(name); setMapGroup(null); setMode('machine'); setDepth(0); }}
+                onStartPresent={() => { setPresent(true); setMode('story'); setIndex(1); setReveal(1); setDepth(0); }}
+              />
+            )}
+            {mode === 'story' && stop && depth === 0 && (
+              <StopView
+                stop={stop}
+                part={part}
+                number={index}
+                eda={eda}
+                source={story.project?.source}
+                showNotes={showNotes}
+                present={present}
+                revealStep={reveal}
+                onAdvanceReveal={() => setReveal(r => Math.min(3, r + 1))}
+                onOpenMachine={openMachineFromScene}
+              />
+            )}
+            {mode === 'machine' && depth === 0 && (
+              <MachineCanvas
+                data={beadData}
+                stops={stops}
+                partColor={partColorFn}
+                selectedBeadName={activeBeadName}
+                onSelectBead={setDrillBead}
+                onOpenStop={num => goStop(num, present ? 3 : 3)}
+                onOpenDepth={setDepthSafe}
+                focusScene={focusScene}
+                onClearFocus={() => setFocusScene(null)}
+                group={mapGroup}
+                onGroupChange={setMapGroup}
+              />
+            )}
+            {depth > 0 && activeBead && (
+              <section className="drill" style={{ '--p': stop ? colorForPart(part) : 'var(--btn-primary-bg)' }}>
+                {depth === 1 && (
+                  <CodeLayer
+                    data={beadData}
+                    selectedBeadName={activeBead.name}
+                    onSelectBead={setDrillBead}
+                    onZoomTo={d => setDepthSafe(Math.max(0, d - 1))}
+                  />
+                )}
+                {depth === 2 && (
+                  <NumbersLayer
+                    data={beadData}
+                    selectedBeadName={activeBead.name}
+                    onInspectNumber={setNumber}
+                    onZoomTo={d => setDepthSafe(Math.max(0, d - 1))}
+                  />
+                )}
+                {depth === 3 && (
+                  <BinaryLayer
+                    data={beadData}
+                    selectedBeadName={activeBead.name}
+                    inspectedNumber={inspected}
+                    onInspectNumber={setNumber}
+                    onZoomTo={d => setDepthSafe(Math.max(0, d - 1))}
+                  />
+                )}
+              </section>
+            )}
+          </StopBoundary>
+        </main>
+      </div>
 
-      <Chapter id="next" no="10" eyebrow="Coming next" title="Steps 1–6">
-        <p>Remaining steps from <code>MASTER_PLAN.md</code>. Status: planned.</p>
-        <ol className="steps">
-          {NEXT_STEPS.map(([step, title, body]) => (
-            <li key={step}><span className="label">{step}</span><strong>{title}</strong><span>{body}</span></li>
-          ))}
-        </ol>
-      </Chapter>
-    </main>
+      <footer className="bl-foot">
+        {mode === 'story' ? (
+          <button type="button" className="nav-btn" disabled={prevLabel == null && !(present && reveal > 1)} onClick={stepPrev}>
+            ← {present && reveal > 1 ? `Step ${reveal - 1}` : prevLabel}
+          </button>
+        ) : (
+          <button type="button" className="nav-btn" onClick={() => { setMode('story'); setDepth(0); }}>
+            ← Back to Slides
+          </button>
+        )}
+
+        {(mode === 'machine' || stop) ? (
+          <div className="dock" role="toolbar" aria-label="Detail level, slide parts, and notes">
+            {present && mode === 'story' && stop && depth === 0 && (
+              <>
+                <div className="build-steps" role="group" aria-label="Slide part">
+                  {['1 · Stats', '2 · Chart', '3 · Text'].map((lbl, idx) => (
+                    <button
+                      key={lbl}
+                      type="button"
+                      className={reveal === idx + 1 ? 'on' : reveal > idx + 1 ? 'soft on' : ''}
+                      onClick={() => setReveal(idx + 1)}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+                <span className="dock-gap" />
+              </>
+            )}
+            {depthLabels.map((d, i) => (
+              <button
+                key={d}
+                type="button"
+                aria-pressed={depth === i}
+                disabled={i > 0 && !canDrill}
+                className={depth === i ? 'on' : ''}
+                onClick={() => setDepthSafe(i)}
+              >
+                {i > 0 && '↓ '}{d}
+              </button>
+            ))}
+            {mode === 'story' && stop && (
+              <>
+                <span className="dock-gap" />
+                <button
+                  type="button"
+                  aria-pressed={showNotes}
+                  className={showNotes ? 'on soft' : 'soft'}
+                  onClick={() => setShowNotes(v => !v)}
+                  title="Show or hide speaker notes (N)"
+                >
+                  Notes
+                </button>
+              </>
+            )}
+          </div>
+        ) : (
+          <span />
+        )}
+
+        {mode === 'story' ? (
+          <button
+            type="button"
+            className="nav-btn"
+            disabled={nextLabel == null && !(present && index > 0 && reveal < 3)}
+            onClick={stepNext}
+          >
+            {present && index > 0 && reveal < 3 ? `Next: ${['Stats', 'Chart', 'Text'][reveal]} (${reveal + 1}/3)` : nextLabel} →
+          </button>
+        ) : (
+          <span className="keys" style={{ justifySelf: 'end' }}>Scroll up to zoom in · Scroll down to zoom out · ↑ goes back</span>
+        )}
+      </footer>
+    </div>
   );
 }

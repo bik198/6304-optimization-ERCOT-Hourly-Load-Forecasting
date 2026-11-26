@@ -22,3 +22,6 @@ Thumbs.db
 # Web story (Vite) build output & dependencies
 web/node_modules/
 web/dist/
+
+# Offline single-file bundle and PDF export (npm run offline / npm run pdf)
+web/dist-offline/
